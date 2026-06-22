@@ -1,22 +1,19 @@
 {
-  "name": "mig66-ai-bot",
-  "version": "2.0.0",
-  "description": "MIG66 AI Bot - Full Edition",
-  "main": "bot.js",
+  "name": "mig66-bot",
+  "version": "3.0.0",
+  "description": "mig66 AI Bot - Full Edition v3.0",
+  "main": "index.js",
   "scripts": {
-    "start": "node bot.js",
-    "dev": "nodemon bot.js"
+    "start": "node index.js",
+    "dev": "node --watch index.js"
   },
+  "keywords": ["mig66", "bot", "ai"],
+  "author": "",
+  "license": "ISC",
   "dependencies": {
-    "dotenv": "^16.4.5",
-    "express": "^4.21.2",
-    "socket.io-client": "^4.8.1",
-    "axios": "^1.7.9"
-  },
-  "devDependencies": {
-    "nodemon": "^3.1.9"
-  },
-  "engines": {
-    "node": ">=18.0.0"
+    "dotenv": "^17.4.2",
+    "express": "^5.2.1",
+    "node-fetch": "^3.3.2",
+    "socket.io-client": "^4.8.3"
   }
 }
