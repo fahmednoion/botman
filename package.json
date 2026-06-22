@@ -1,0 +1,22 @@
+{
+  "name": "mig66-ai-bot",
+  "version": "2.0.0",
+  "description": "MIG66 AI Bot with Auto-Text Sequential System",
+  "main": "bot.js",
+  "scripts": {
+    "start": "node bot.js",
+    "dev": "nodemon bot.js"
+  },
+  "dependencies": {
+    "dotenv": "^16.4.5",
+    "express": "^4.21.2",
+    "socket.io-client": "^4.8.1",
+    "node-fetch": "^2.7.0"
+  },
+  "devDependencies": {
+    "nodemon": "^3.1.9"
+  },
+  "engines": {
+    "node": ">=16.0.0"
+  }
+}
