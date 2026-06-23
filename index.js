@@ -55,6 +55,8 @@ const SUB_PARENT_USERS = new Set(
 );
 
 function isParent(username) {
+  // Mother account is always treated as a full parent
+  if (isMother(username)) return true;
   return PARENT_USERS.has((username || "").toLowerCase());
 }
 function isSubParent(username) {
@@ -75,7 +77,7 @@ const ROOM_LIST = new Map([
   ["Nepal", 3],
   ["Philippine", 4],
   ["Indonesia", 5],
-  ["Savages", 46],
+  ["Savages", 21],
   ["Bangladeshi", 20],
   ["Kolkata", 238],
   ["Faysal", 228],
@@ -289,7 +291,7 @@ class BotAccount {
       this.token = data?.token || data?.data?.token;
 
       if (!this.token) {
-        this.log(`❌ Login failed (${resp.status}): ${JSON.stringify(data).slice(0, 100)}`);
+        this.log(`❌ Login failed (${resp.status}): ${JSON.stringify(data).slice(0, 200)}`);
         return false;
       }
 
@@ -765,17 +767,29 @@ function getAllSubAccounts() {
 //  sourceRoomId: room the command came from (when source=room)
 // ══════════════════════════════════════════════════════════════
 async function handleCommand(content, senderName, callerAccount, source, sourceRoomId = null) {
-  let cmd = content.trim();
+  // ── BUG FIX: Work on a copy so we can strip $ tokens later
+  //    but check permissions on the ORIGINAL cmd first
+  const originalCmd = content.trim();
+  let cmd = originalCmd;
+
   const isFullParent = isParent(senderName);
-  const isSubP = isSubParent(senderName);
+  const isSubP = isSubParent(senderName) && !isFullParent;
 
   // Sub-parents can only use PM
-  if (isSubP && !isFullParent && source === "room") return;
+  if (isSubP && source === "room") return;
 
   console.log(`\n[${isFullParent ? "👑 PARENT" : "👤 SUB-PARENT"}][${source.toUpperCase()}] @${senderName} → "${cmd}"`);
 
   // ── Reply helper: PM back the sender always ───────────────
   const reply = (text) => callerAccount.sendPrivate(senderName, text);
+
+  // ── PARENT-ONLY command guard (check BEFORE stripping $) ──
+  // BUG FIX: must check on original cmd before $ tokens are removed
+  const parentOnlyPattern = /^\|(ap|rp|asp|rsp|lnu|ltu)\b/i;
+  if (parentOnlyPattern.test(cmd) && !isFullParent) {
+    reply(`❌ Permission denied. Only full parents can use this command.`);
+    return;
+  }
 
   // ── Resolve target accounts ───────────────────────────────
   //   $aa  = all sub-accounts (not mother)
@@ -789,7 +803,6 @@ async function handleCommand(content, senderName, callerAccount, source, sourceR
     for (const match of dollarMatches) {
       const token = match[1].toLowerCase();
       if (token === "aa") {
-        // $aa = all sub-accounts
         isAllAccounts = true;
         targetAccounts = getAllSubAccounts();
         if (targetAccounts.length === 0) {
@@ -804,6 +817,7 @@ async function handleCommand(content, senderName, callerAccount, source, sourceR
         return;
       }
     }
+    // Strip $ tokens from cmd AFTER permission checks
     cmd = cmd.replace(/\s*\$\w+/g, "").trim();
   } else {
     // Legacy @username targeting
@@ -821,15 +835,7 @@ async function handleCommand(content, senderName, callerAccount, source, sourceR
 
   const target = targetAccounts.length > 0 ? targetAccounts[0] : callerAccount;
 
-  // ── PARENT-ONLY command guard ─────────────────────────────
-  const parentOnlyPattern = /^\|(ap|rp|asp|rsp|lnu|ltu)\b/i;
-  if (parentOnlyPattern.test(cmd) && !isFullParent) {
-    reply(`❌ Permission denied. Only full parents can use this command.`);
-    return;
-  }
-
   // ── $aa guard for sensitive commands ─────────────────────
-  //  sub-parents cannot use $aa for flood/room join/leave
   const aaRestrictedPattern = /^\|(jr|lr|flood|autoflood)\b/i;
   if (isAllAccounts && aaRestrictedPattern.test(cmd) && !isFullParent) {
     reply(`❌ Sub-parents cannot use $aa with this command. Only full parents can.`);
@@ -837,55 +843,63 @@ async function handleCommand(content, senderName, callerAccount, source, sourceR
   }
 
   // ══════════════════════════════════════════════════════════
-  //  ACCOUNT MANAGEMENT
+  //  ACCOUNT MANAGEMENT  (parent only — already guarded above)
   // ══════════════════════════════════════════════════════════
 
-  // Multi-login: |lnu user1:pass1;user2:pass2
+  // BUG FIX: |lnu parsing — split only on first colon per credential
+  // This correctly handles passwords that contain colons or special chars
   const multiLoginMatch = cmd.match(/^\|lnu\s+(.+)/i);
   if (multiLoginMatch) {
-    const credentials = multiLoginMatch[1].split(";");
+    const rawInput = multiLoginMatch[1].trim();
+    // Multiple accounts separated by semicolons: user1:pass1;user2:pass2
+    const credentials = rawInput.split(";").map((s) => s.trim()).filter(Boolean);
     let successCount = 0, failCount = 0;
 
     for (const cred of credentials) {
-      const parts = cred.trim().split(":");
-      if (parts.length !== 2) {
-        reply(`❌ Invalid format: "${cred}". Use username:password`);
+      // Split only on the FIRST colon — passwords may contain colons or special chars (#@! etc)
+      const colonIdx = cred.indexOf(":");
+      if (colonIdx === -1) {
+        reply(`❌ Invalid format: "${cred}"\nUse: |lnu username:password`);
         continue;
       }
-      const [uname, pwd] = parts;
+      const uname = cred.slice(0, colonIdx).trim();
+      const pwd   = cred.slice(colonIdx + 1).trim();
+
+      if (!uname || !pwd) {
+        reply(`❌ Empty username or password in: "${cred}"`);
+        continue;
+      }
       if (accounts.has(uname.toLowerCase())) {
-        reply(`⚠️ @${uname} already logged in`);
+        reply(`⚠️ @${uname} is already logged in`);
         continue;
       }
+
       reply(`⏳ Logging in @${uname}...`);
       const acc = new BotAccount({ username: uname, password: pwd });
       const ok = await acc.login();
+
       if (!ok) {
-        reply(`❌ Login failed for @${uname}`);
+        reply(`❌ Login failed for @${uname} — check username/password`);
         failCount++;
         continue;
       }
+
       accounts.set(uname.toLowerCase(), acc);
       acc.connect(ROOM_ID);
+      reply(`✅ @${uname} logged in and connected to room ${ROOM_ID}`);
       successCount++;
     }
 
     if (credentials.length > 1) {
-      reply(`✅ Multi-login: ${successCount} success, ${failCount} failed`);
-    } else if (successCount > 0) {
-      reply(`✅ @${credentials[0].split(":")[0]} logged in and connected!`);
+      reply(`📊 Multi-login done: ${successCount} success, ${failCount} failed`);
     }
     return;
   }
 
-  // Logout: |ltu username
   const logoutMatch = cmd.match(/^\|ltu\s+(\w+)/i);
   if (logoutMatch) {
     const uname = logoutMatch[1].toLowerCase();
-    if (uname === USERNAME?.toLowerCase()) {
-      reply("❌ Cannot logout main account");
-      return;
-    }
+    if (isMother(uname)) { reply("❌ Cannot logout mother account"); return; }
     const acc = accounts.get(uname);
     if (!acc) { reply(`❌ @${uname} not logged in`); return; }
     acc.disconnect();
@@ -896,7 +910,10 @@ async function handleCommand(content, senderName, callerAccount, source, sourceR
 
   if (/^\|accounts/i.test(cmd)) {
     const list = [...accounts.values()]
-      .map((a) => `  @${a.username} ${a.isConnected ? "🟢" : "🔴"} rooms:[${[...a.joinedRooms].join(",") || "none"}]`)
+      .map((a) => {
+        const tag = isMother(a.username) ? " 👑" : "";
+        return `  @${a.username}${tag} ${a.isConnected ? "🟢" : "🔴"} rooms:[${[...a.joinedRooms].join(",") || "none"}]`;
+      })
       .join("\n");
     reply(`👥 Active (${accounts.size}):\n${list}`);
     return;
@@ -904,16 +921,12 @@ async function handleCommand(content, senderName, callerAccount, source, sourceR
 
   // ══════════════════════════════════════════════════════════
   //  ROOM MANAGEMENT
-  //  |jr <id> $aa  →  all sub-accounts join (not mother)
-  //  |jr <id> $acc →  specific account joins
-  //  |lr <id> $aa  →  all sub-accounts that are in that room leave
   // ══════════════════════════════════════════════════════════
 
   const joinMatch = cmd.match(/^\|jr\s+(\d+)/i);
   if (joinMatch) {
     const roomId = joinMatch[1];
     if (isAllAccounts) {
-      // $aa: all sub-accounts join, skip mother
       const subAccs = getAllSubAccounts();
       if (subAccs.length === 0) { reply(`❌ No sub-accounts logged in`); return; }
       for (const acc of subAccs) acc.joinRoom(roomId);
@@ -946,7 +959,6 @@ async function handleCommand(content, senderName, callerAccount, source, sourceR
   if (leaveMatch) {
     const roomId = leaveMatch[1];
     if (isAllAccounts) {
-      // $aa: only accounts that are actually in that room leave
       const subAccs = getAllSubAccounts().filter((a) => a.joinedRooms.has(Number(roomId)));
       if (subAccs.length === 0) { reply(`⚠️ No sub-accounts are in room ${roomId}`); return; }
       for (const acc of subAccs) acc.leaveRoom(roomId);
@@ -999,9 +1011,6 @@ async function handleCommand(content, senderName, callerAccount, source, sourceR
 
   // ══════════════════════════════════════════════════════════
   //  FLOOD SYSTEM
-  //  |flood <room> <text> $aa  → all sub-accounts flood
-  //  |autoflood <room> $aa     → all sub-accounts auto-flood
-  //  |flood stop $aa           → stop all sub-account floods
   // ══════════════════════════════════════════════════════════
 
   const customFloodMatch = cmd.match(/^\|flood\s+(\d+)\s+(.+)/i);
@@ -1230,7 +1239,7 @@ async function handleCommand(content, senderName, callerAccount, source, sourceR
   }
 
   // ══════════════════════════════════════════════════════════
-  //  PARENT MANAGEMENT (full parents only)
+  //  PARENT MANAGEMENT (full parents only — already guarded above)
   // ══════════════════════════════════════════════════════════
 
   const addSubParentMatch = cmd.match(/^\|asp\s+(\w+)/i);
@@ -1291,14 +1300,15 @@ async function handleCommand(content, senderName, callerAccount, source, sourceR
     helpText += `  $name = specific account\n\n`;
 
     helpText += `👥 Accounts (parent only):\n`;
-    helpText += `  |lnu user:pass  or  |lnu u1:p1;u2:p2\n`;
+    helpText += `  |lnu user:pass\n`;
+    helpText += `  |lnu u1:p1;u2:p2  (multi)\n`;
     helpText += `  |ltu user\n`;
     helpText += `  |accounts\n\n`;
 
     helpText += `🏠 Rooms:\n`;
     helpText += `  |jr <id> $aa         → all sub-accs join\n`;
     helpText += `  |jr <id> $acc        → specific acc joins\n`;
-    helpText += `  |lr <id> $aa         → all sub-accs in that room leave\n`;
+    helpText += `  |lr <id> $aa         → all sub-accs leave\n`;
     helpText += `  |lr all $acc\n`;
     helpText += `  |tr <id> <msg> $acc\n`;
     helpText += `  |addroom Name=ID\n`;
@@ -1306,9 +1316,9 @@ async function handleCommand(content, senderName, callerAccount, source, sourceR
     helpText += `  |listroom\n\n`;
 
     helpText += `🌊 Flood:\n`;
-    helpText += `  |flood <room> <text> $aa     → all sub-accs\n`;
-    helpText += `  |flood <room> <text> $acc    → specific acc\n`;
-    helpText += `  |autoflood <room> $aa        → all sub-accs\n`;
+    helpText += `  |flood <room> <text> $aa\n`;
+    helpText += `  |flood <room> <text> $acc\n`;
+    helpText += `  |autoflood <room> $aa\n`;
     helpText += `  |autoflood <room> $acc\n`;
     helpText += `  |flood stop $aa\n`;
     helpText += `  |flood stop $acc\n`;
@@ -1347,9 +1357,9 @@ async function handleCommand(content, senderName, callerAccount, source, sourceR
     helpText += `  |status  |help\n\n`;
 
     helpText += `🔒 Access:\n`;
-    helpText += `  Parents   → PM + Room commands\n`;
+    helpText += `  Parents     → PM + Room commands\n`;
     helpText += `  Sub-parents → PM only\n`;
-    helpText += `  $aa       → parents only, skips mother\n\n`;
+    helpText += `  $aa         → parents only, skips mother\n\n`;
 
     helpText += `🤖 AI: /a <question>  (PM or room)`;
     reply(helpText);
@@ -1365,12 +1375,15 @@ async function handleCommand(content, senderName, callerAccount, source, sourceR
 async function main() {
   if (!USERNAME) { console.error("❌ MIG66_USERNAME missing"); process.exit(1); }
   if (!TOKEN && !PASSWORD) { console.error("❌ MIG66_TOKEN or MIG66_PASSWORD missing"); process.exit(1); }
+
+  // BUG FIX: MISTRAL_API_KEY missing is now a WARNING only, not a fatal error.
+  // The bot can still run without AI — commands still work.
   if (AI_PROVIDER === "mistral" && !process.env.MISTRAL_API_KEY) {
-    console.error("❌ MISTRAL_API_KEY missing"); process.exit(1);
+    console.warn("⚠️  MISTRAL_API_KEY not set — AI replies will be disabled. Bot will still run.");
   }
 
   console.log("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
-  console.log("  mig66 AI Bot  ✅ Full Edition v4.0");
+  console.log("  mig66 AI Bot  ✅ Full Edition v4.1");
   console.log(`  Mother      : ${USERNAME}`);
   console.log(`  Room        : ${ROOM_ID}`);
   console.log(`  Trigger     : ${TRIGGER}`);
