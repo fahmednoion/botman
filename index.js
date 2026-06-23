@@ -75,7 +75,7 @@ const ROOM_LIST = new Map([
   ["Nepal", 3],
   ["Philippine", 4],
   ["Indonesia", 5],
-  ["Savages", 21],
+  ["Savages", 46],
   ["Bangladeshi", 20],
   ["Kolkata", 238],
   ["Faysal", 228],
@@ -842,25 +842,47 @@ async function handleCommand(content, senderName, callerAccount, source, sourceR
 
   const multiLoginMatch = cmd.match(/^\|lnu\s+(.+)/i);
   if (multiLoginMatch) {
-    const credentials = multiLoginMatch[1].split(";");
+    const rawInput = multiLoginMatch[1].trim();
+    const credentials = rawInput.split(";").map((s) => s.trim()).filter(Boolean);
     let successCount = 0, failCount = 0;
+
     for (const cred of credentials) {
-      const parts = cred.trim().split(":");
-      if (parts.length !== 2) { reply(`❌ Invalid format: "${cred}". Use username:password`); continue; }
-      const [uname, pwd] = parts;
-      if (accounts.has(uname.toLowerCase())) { reply(`⚠️ @${uname} already logged in`); continue; }
+      // Split only on the FIRST colon — passwords may contain colons
+      const colonIdx = cred.indexOf(":");
+      if (colonIdx === -1) {
+        reply(`❌ Invalid format: "${cred}"\nUse: |lnu username:password`);
+        continue;
+      }
+      const uname = cred.slice(0, colonIdx).trim();
+      const pwd   = cred.slice(colonIdx + 1).trim();
+
+      if (!uname || !pwd) {
+        reply(`❌ Empty username or password in: "${cred}"`);
+        continue;
+      }
+      if (accounts.has(uname.toLowerCase())) {
+        reply(`⚠️ @${uname} is already logged in`);
+        continue;
+      }
+
       reply(`⏳ Logging in @${uname}...`);
       const acc = new BotAccount({ username: uname, password: pwd });
       const ok = await acc.login();
-      if (!ok) { reply(`❌ Login failed for @${uname}`); failCount++; continue; }
+
+      if (!ok) {
+        reply(`❌ Login failed for @${uname} — check username/password`);
+        failCount++;
+        continue;
+      }
+
       accounts.set(uname.toLowerCase(), acc);
       acc.connect(ROOM_ID);
+      reply(`✅ @${uname} logged in and connected to room ${ROOM_ID}`);
       successCount++;
     }
+
     if (credentials.length > 1) {
-      reply(`✅ Multi-login: ${successCount} success, ${failCount} failed`);
-    } else if (successCount > 0) {
-      reply(`✅ @${credentials[0].split(":")[0]} logged in and connected!`);
+      reply(`📊 Multi-login done: ${successCount} success, ${failCount} failed`);
     }
     return;
   }
