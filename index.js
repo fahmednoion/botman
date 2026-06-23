@@ -30,7 +30,7 @@ app.listen(PORT, "0.0.0.0", () => {
 //  CONFIGURATION
 // ══════════════════════════════════════════════════════════════
 const API_BASE = process.env.API_BASE || "https://dashboard.mig66.com";
-const USERNAME = process.env.MIG66_USERNAME;
+const USERNAME = process.env.MIG66_USERNAME;           // Mother account username
 const PASSWORD = process.env.MIG66_PASSWORD;
 let TOKEN = process.env.MIG66_TOKEN;
 const ROOM_ID = parseInt(process.env.MIG66_ROOM_ID || "50");
@@ -63,6 +63,9 @@ function isSubParent(username) {
 function isAuthorized(username) {
   return isParent(username) || isSubParent(username);
 }
+function isMother(username) {
+  return (username || "").toLowerCase() === (USERNAME || "").toLowerCase();
+}
 
 // ── Room List ─────────────────────────────────────────────────
 const ROOM_LIST = new Map([
@@ -72,7 +75,7 @@ const ROOM_LIST = new Map([
   ["Nepal", 3],
   ["Philippine", 4],
   ["Indonesia", 5],
-  ["Savages", 46],
+  ["Savages", 21],
   ["Bangladeshi", 20],
   ["Kolkata", 238],
   ["Faysal", 228],
@@ -117,7 +120,6 @@ function saveTokenToEnv(newToken) {
   }
 }
 
-// Load auto-text messages from at.txt
 function loadAutoTexts() {
   const messages = [];
   try {
@@ -136,7 +138,6 @@ function loadAutoTexts() {
   return messages;
 }
 
-// Load flood messages from flood.txt
 function loadFloodTexts() {
   const messages = [];
   try {
@@ -208,15 +209,15 @@ class BotAccount {
     this.awOn = false;
     this.autoReplyOn = false;
     this.awTemplate = AW_MESSAGE;
-    this.awRooms = new Set();         // empty = all rooms
-    this.awMessages = new Map();      // per-room welcome overrides
+    this.awRooms = new Set();
+    this.awMessages = new Map();
 
     // Auto-text system
     this.autoTextOn = false;
     this.autoTextRooms = new Set();
     this.autoTextMessages = [];
     this.autoTextIndex = new Map();
-    this.autoTextInterval = 5;        // minutes
+    this.autoTextInterval = 5;
     this.autoTextTimer = null;
 
     // Flood system
@@ -318,7 +319,6 @@ class BotAccount {
     }
   }
 
-  // ── Authenticated HTTP helper ─────────────────────────────
   async api(method, apiPath, body) {
     const opts = {
       method,
@@ -437,23 +437,16 @@ class BotAccount {
 
     const sendNextMessage = () => {
       if (!this.autoTextOn) return;
-
       for (const roomId of this.autoTextRooms) {
         if (!this.joinedRooms.has(roomId)) continue;
         if (!this.autoTextIndex.has(roomId)) this.autoTextIndex.set(roomId, 0);
-
         let index = this.autoTextIndex.get(roomId);
-        if (index >= this.autoTextMessages.length) {
-          index = 0;
-          this.autoTextIndex.set(roomId, 0);
-        }
-
+        if (index >= this.autoTextMessages.length) { index = 0; this.autoTextIndex.set(roomId, 0); }
         const message = this.autoTextMessages[index];
         this.sendRoom(roomId, message);
         this.log(`📝 AutoText [${index + 1}/${this.autoTextMessages.length}] → Room ${roomId}`);
         this.autoTextIndex.set(roomId, index + 1);
       }
-
       this.autoTextTimer = setTimeout(sendNextMessage, this.autoTextInterval * 60 * 1000);
     };
 
@@ -461,18 +454,12 @@ class BotAccount {
   }
 
   stopAutoText() {
-    if (this.autoTextTimer) {
-      clearTimeout(this.autoTextTimer);
-      this.autoTextTimer = null;
-    }
+    if (this.autoTextTimer) { clearTimeout(this.autoTextTimer); this.autoTextTimer = null; }
   }
 
   setAutoTextInterval(minutes) {
     this.autoTextInterval = minutes;
-    if (this.autoTextOn && this.autoTextTimer) {
-      this.stopAutoText();
-      this.startAutoText();
-    }
+    if (this.autoTextOn && this.autoTextTimer) { this.stopAutoText(); this.startAutoText(); }
   }
 
   // ── Flood System ──────────────────────────────────────────
@@ -483,19 +470,14 @@ class BotAccount {
     this.floodMode = "custom";
     this.floodCustomText = customText;
     this.floodMessageCount = 0;
-
     this.log(`🌊 CUSTOM FLOOD STARTED in room ${roomId} | text: "${customText}"`);
 
     const sendFloodMessage = () => {
-      if (!this.floodActive || !this.socket?.connected) {
-        this.stopFlood();
-        return;
-      }
+      if (!this.floodActive || !this.socket?.connected) { this.stopFlood(); return; }
       this.sendRoom(this.floodRoomId, this.floodCustomText);
       this.floodMessageCount++;
       this.floodInterval = setTimeout(sendFloodMessage, 100);
     };
-
     sendFloodMessage();
     return true;
   }
@@ -503,41 +485,29 @@ class BotAccount {
   startAutoFlood(roomId) {
     this.stopFlood();
     this.floodMessages = loadFloodTexts();
-
-    if (this.floodMessages.length === 0) {
-      this.log("❌ No messages in flood.txt for auto flood");
-      return false;
-    }
+    if (this.floodMessages.length === 0) { this.log("❌ No messages in flood.txt"); return false; }
 
     this.floodActive = true;
     this.floodRoomId = Number(roomId);
     this.floodMode = "auto";
     this.floodIndex = 0;
     this.floodMessageCount = 0;
-
     this.log(`🌊 AUTO FLOOD STARTED in room ${roomId} — ${this.floodMessages.length} messages`);
 
     const sendFloodMessage = () => {
-      if (!this.floodActive || !this.socket?.connected) {
-        this.stopFlood();
-        return;
-      }
+      if (!this.floodActive || !this.socket?.connected) { this.stopFlood(); return; }
       if (this.floodIndex >= this.floodMessages.length) this.floodIndex = 0;
       this.sendRoom(this.floodRoomId, this.floodMessages[this.floodIndex]);
       this.floodIndex++;
       this.floodMessageCount++;
       this.floodInterval = setTimeout(sendFloodMessage, 100);
     };
-
     sendFloodMessage();
     return true;
   }
 
   stopFlood() {
-    if (this.floodInterval) {
-      clearTimeout(this.floodInterval);
-      this.floodInterval = null;
-    }
+    if (this.floodInterval) { clearTimeout(this.floodInterval); this.floodInterval = null; }
     if (this.floodActive) {
       this.log(`🛑 FLOOD STOPPED in room ${this.floodRoomId} (${this.floodMessageCount} msgs sent)`);
     }
@@ -564,21 +534,19 @@ class BotAccount {
     const awRoomsStr = this.awRooms.size > 0 ? [...this.awRooms].join(", ") : "all";
     const bal = this.balance !== null ? `${this.balance} cents` : "unknown";
     const uptime = formatUptime((Date.now() - this.startTime) / 1000);
+    const motherTag = isMother(this.username) ? " 👑MOTHER" : "";
 
     let atStatus = "🔴 OFF";
     if (this.autoTextOn) {
       const atRoomsStr = [...this.autoTextRooms].join(", ");
       const atProgress = [...this.autoTextRooms]
-        .map((rid) => {
-          const cur = this.autoTextIndex.get(rid) || 0;
-          return `R${rid}:${cur}/${this.autoTextMessages.length}`;
-        })
+        .map((rid) => { const cur = this.autoTextIndex.get(rid) || 0; return `R${rid}:${cur}/${this.autoTextMessages.length}`; })
         .join(", ");
       atStatus = `🟢 ON (rooms: ${atRoomsStr}, ${atProgress}, interval: ${this.autoTextInterval}m)`;
     }
 
     return (
-      `👤 @${this.username}\n` +
+      `👤 @${this.username}${motherTag}\n` +
       `  Connection  : ${this.isConnected ? "🟢 Online" : "🔴 Offline"}\n` +
       `  Active rooms: [${rooms}]\n` +
       `  Voucher pick: ${this.voucherOn ? "🟢 ON" : "🔴 OFF"}\n` +
@@ -603,9 +571,9 @@ class BotAccount {
 
     this.log(`📨 PM from @${senderName}: "${content}"`);
 
-    // Parent/sub-parent commands
+    // Commands via PM — both parents and sub-parents allowed
     if (isAuthorized(senderName) && content.startsWith("|")) {
-      await handleParentCommand(content, senderName, this);
+      await handleCommand(content, senderName, this, "private");
       return;
     }
 
@@ -645,6 +613,12 @@ class BotAccount {
     if (this.userId && senderId === this.userId) return;
     if (senderName.toLowerCase() === this.username.toLowerCase()) return;
 
+    // Room commands — PARENTS ONLY (sub-parents must use PM)
+    if (isParent(senderName) && content.startsWith("|")) {
+      await handleCommand(content, senderName, this, "room", roomId);
+      return;
+    }
+
     // AI direct trigger /a
     if (content.toLowerCase().startsWith("/a ") && this.autoReplyOn) {
       const question = content.slice(3).trim();
@@ -674,10 +648,7 @@ class BotAccount {
 
   // ── Connect socket ─────────────────────────────────────────
   connect(defaultRoom) {
-    if (this.reconnTimer) {
-      clearTimeout(this.reconnTimer);
-      this.reconnTimer = null;
-    }
+    if (this.reconnTimer) { clearTimeout(this.reconnTimer); this.reconnTimer = null; }
 
     if (this.isTokenExpired()) {
       this.log("⚠️  Token expired — re-logging in...");
@@ -781,35 +752,61 @@ class BotAccount {
 // ══════════════════════════════════════════════════════════════
 const accounts = new Map();
 
+// ── Helper: get all sub-accounts (excludes mother, parents, sub-parents) ─
+function getAllSubAccounts() {
+  return [...accounts.values()].filter(
+    (a) => !isMother(a.username) && !isParent(a.username) && !isSubParent(a.username)
+  );
+}
+
 // ══════════════════════════════════════════════════════════════
-//  PARENT COMMAND HANDLER
+//  UNIFIED COMMAND HANDLER
+//  source: "private" | "room"
+//  sourceRoomId: room the command came from (when source=room)
 // ══════════════════════════════════════════════════════════════
-async function handleParentCommand(content, senderName, callerAccount) {
+async function handleCommand(content, senderName, callerAccount, source, sourceRoomId = null) {
   let cmd = content.trim();
   const isFullParent = isParent(senderName);
+  const isSubP = isSubParent(senderName);
+
+  // Sub-parents can only use PM
+  if (isSubP && !isFullParent && source === "room") return;
+
+  console.log(`\n[${isFullParent ? "👑 PARENT" : "👤 SUB-PARENT"}][${source.toUpperCase()}] @${senderName} → "${cmd}"`);
+
+  // ── Reply helper: PM back the sender always ───────────────
   const reply = (text) => callerAccount.sendPrivate(senderName, text);
 
-  console.log(`\n[${isFullParent ? "👑 PARENT" : "👤 SUB-PARENT"}] @${senderName} → "${cmd}"`);
-
-  // ── Resolve target accounts via $username syntax ──────────
-  // Supports multiple targets: |jr 228 $acc1 $acc2
-  // Also supports legacy single @username syntax for backwards compat
-  const targetAccounts = [];
+  // ── Resolve target accounts ───────────────────────────────
+  //   $aa  = all sub-accounts (not mother)
+  //   $username = specific account
+  //   (none) = caller account itself
+  let targetAccounts = [];
+  let isAllAccounts = false;
 
   const dollarMatches = [...cmd.matchAll(/\$(\w+)/g)];
   if (dollarMatches.length > 0) {
     for (const match of dollarMatches) {
-      const acctName = match[1].toLowerCase();
-      if (accounts.has(acctName)) {
-        targetAccounts.push(accounts.get(acctName));
+      const token = match[1].toLowerCase();
+      if (token === "aa") {
+        // $aa = all sub-accounts
+        isAllAccounts = true;
+        targetAccounts = getAllSubAccounts();
+        if (targetAccounts.length === 0) {
+          reply(`❌ No sub-accounts are currently logged in. Use |lnu to add accounts first.`);
+          return;
+        }
+        break;
+      } else if (accounts.has(token)) {
+        targetAccounts.push(accounts.get(token));
       } else {
-        reply(`❌ Unknown account $${acctName}`);
+        reply(`❌ Unknown account $${token}. Use |accounts to see active accounts.`);
         return;
       }
     }
     cmd = cmd.replace(/\s*\$\w+/g, "").trim();
   } else {
-    // legacy @username targeting
+    // Legacy @username targeting
     const atMatch = cmd.match(/^\|\w+\s+@(\w+)/);
     if (atMatch) {
       const acctName = atMatch[1].toLowerCase();
@@ -824,47 +821,42 @@ async function handleParentCommand(content, senderName, callerAccount) {
 
   const target = targetAccounts.length > 0 ? targetAccounts[0] : callerAccount;
 
-  // ── PARENT-ONLY guard ─────────────────────────────────────
-  const parentOnlyPattern = /^\|(ap|rp|asp|rsp)\s/i;
+  // ── PARENT-ONLY command guard ─────────────────────────────
+  const parentOnlyPattern = /^\|(ap|rp|asp|rsp|lnu|ltu)\b/i;
   if (parentOnlyPattern.test(cmd) && !isFullParent) {
     reply(`❌ Permission denied. Only full parents can use this command.`);
     return;
   }
 
+  // ── $aa guard for sensitive commands ─────────────────────
+  //  sub-parents cannot use $aa for flood/room join/leave
+  const aaRestrictedPattern = /^\|(jr|lr|flood|autoflood)\b/i;
+  if (isAllAccounts && aaRestrictedPattern.test(cmd) && !isFullParent) {
+    reply(`❌ Sub-parents cannot use $aa with this command. Only full parents can.`);
+    return;
+  }
+
   // ══════════════════════════════════════════════════════════
-  //  ACCOUNT MANAGEMENT
+  //  ACCOUNT MANAGEMENT  (parent only)
   // ══════════════════════════════════════════════════════════
 
-  // Multi-login: |lnu user1:pass1;user2:pass2
   const multiLoginMatch = cmd.match(/^\|lnu\s+(.+)/i);
   if (multiLoginMatch) {
     const credentials = multiLoginMatch[1].split(";");
     let successCount = 0, failCount = 0;
-
     for (const cred of credentials) {
       const parts = cred.trim().split(":");
-      if (parts.length !== 2) {
-        reply(`❌ Invalid format: "${cred}". Use username:password`);
-        continue;
-      }
+      if (parts.length !== 2) { reply(`❌ Invalid format: "${cred}". Use username:password`); continue; }
       const [uname, pwd] = parts;
-      if (accounts.has(uname.toLowerCase())) {
-        reply(`⚠️ @${uname} already logged in`);
-        continue;
-      }
+      if (accounts.has(uname.toLowerCase())) { reply(`⚠️ @${uname} already logged in`); continue; }
       reply(`⏳ Logging in @${uname}...`);
       const acc = new BotAccount({ username: uname, password: pwd });
       const ok = await acc.login();
-      if (!ok) {
-        reply(`❌ Login failed for @${uname}`);
-        failCount++;
-        continue;
-      }
+      if (!ok) { reply(`❌ Login failed for @${uname}`); failCount++; continue; }
       accounts.set(uname.toLowerCase(), acc);
       acc.connect(ROOM_ID);
       successCount++;
     }
-
     if (credentials.length > 1) {
       reply(`✅ Multi-login: ${successCount} success, ${failCount} failed`);
     } else if (successCount > 0) {
@@ -873,14 +865,10 @@ async function handleParentCommand(content, senderName, callerAccount) {
     return;
   }
 
-  // Logout: |ltu username
   const logoutMatch = cmd.match(/^\|ltu\s+(\w+)/i);
   if (logoutMatch) {
     const uname = logoutMatch[1].toLowerCase();
-    if (uname === USERNAME?.toLowerCase()) {
-      reply("❌ Cannot logout main account");
-      return;
-    }
+    if (isMother(uname)) { reply("❌ Cannot logout mother account"); return; }
     const acc = accounts.get(uname);
     if (!acc) { reply(`❌ @${uname} not logged in`); return; }
     acc.disconnect();
@@ -891,7 +879,10 @@ async function handleParentCommand(content, senderName, callerAccount) {
 
   if (/^\|accounts/i.test(cmd)) {
     const list = [...accounts.values()]
-      .map((a) => `  @${a.username} ${a.isConnected ? "🟢" : "🔴"} rooms:[${[...a.joinedRooms].join(",") || "none"}]`)
+      .map((a) => {
+        const tag = isMother(a.username) ? " 👑" : "";
+        return `  @${a.username}${tag} ${a.isConnected ? "🟢" : "🔴"} rooms:[${[...a.joinedRooms].join(",") || "none"}]`;
+      })
       .join("\n");
     reply(`👥 Active (${accounts.size}):\n${list}`);
     return;
@@ -899,16 +890,25 @@ async function handleParentCommand(content, senderName, callerAccount) {
 
   // ══════════════════════════════════════════════════════════
   //  ROOM MANAGEMENT
+  //  |jr <id> $aa  →  all sub-accounts join (not mother)
+  //  |jr <id> $acc →  specific account joins
+  //  |lr <id> $aa  →  all sub-accounts that are in that room leave
   // ══════════════════════════════════════════════════════════
 
-  // Multi-account room join: |jr 228 $acc1 $acc2
   const joinMatch = cmd.match(/^\|jr\s+(\d+)/i);
   if (joinMatch) {
     const roomId = joinMatch[1];
-    if (targetAccounts.length > 0) {
+    if (isAllAccounts) {
+      // $aa: all sub-accounts join, skip mother
+      const subAccs = getAllSubAccounts();
+      if (subAccs.length === 0) { reply(`❌ No sub-accounts logged in`); return; }
+      for (const acc of subAccs) acc.joinRoom(roomId);
+      const names = subAccs.map((a) => `@${a.username}`).join(", ");
+      reply(`✅ All sub-accounts joining room ${roomId}:\n${names}`);
+    } else if (targetAccounts.length > 0) {
       for (const acc of targetAccounts) acc.joinRoom(roomId);
-      const usernames = targetAccounts.map((a) => `@${a.username}`).join(", ");
-      reply(`✅ ${usernames} → Joining room ${roomId}`);
+      const names = targetAccounts.map((a) => `@${a.username}`).join(", ");
+      reply(`✅ ${names} → Joining room ${roomId}`);
     } else {
       target.joinRoom(roomId);
       reply(`✅ @${target.username} joining room ${roomId}`);
@@ -917,15 +917,34 @@ async function handleParentCommand(content, senderName, callerAccount) {
   }
 
   if (/^\|lr\s+all/i.test(cmd)) {
-    const count = target.leaveAll();
-    reply(`✅ @${target.username} left all rooms (${count})`);
+    if (isAllAccounts) {
+      let total = 0;
+      for (const acc of getAllSubAccounts()) total += acc.leaveAll();
+      reply(`✅ All sub-accounts left all their rooms (${total} total)`);
+    } else {
+      const count = target.leaveAll();
+      reply(`✅ @${target.username} left all rooms (${count})`);
+    }
     return;
   }
 
   const leaveMatch = cmd.match(/^\|lr\s+(\d+)/i);
   if (leaveMatch) {
-    target.leaveRoom(leaveMatch[1]);
-    reply(`✅ @${target.username} left room ${leaveMatch[1]}`);
+    const roomId = leaveMatch[1];
+    if (isAllAccounts) {
+      // $aa: only accounts that are actually in that room leave
+      const subAccs = getAllSubAccounts().filter((a) => a.joinedRooms.has(Number(roomId)));
+      if (subAccs.length === 0) { reply(`⚠️ No sub-accounts are in room ${roomId}`); return; }
+      for (const acc of subAccs) acc.leaveRoom(roomId);
+      const names = subAccs.map((a) => `@${a.username}`).join(", ");
+      reply(`✅ Left room ${roomId}:\n${names}`);
+    } else if (targetAccounts.length > 0) {
+      for (const acc of targetAccounts) acc.leaveRoom(roomId);
+      reply(`✅ ${targetAccounts.map((a) => `@${a.username}`).join(", ")} left room ${roomId}`);
+    } else {
+      target.leaveRoom(roomId);
+      reply(`✅ @${target.username} left room ${roomId}`);
+    }
     return;
   }
 
@@ -941,10 +960,7 @@ async function handleParentCommand(content, senderName, callerAccount) {
     const roomsToAdd = addRoomMatch[1].split(",");
     for (const room of roomsToAdd) {
       const parts = room.split(/[:=]/).map((s) => s.trim());
-      if (parts.length !== 2 || !parts[0] || !parts[1]) {
-        reply(`❌ Invalid: "${room}". Use Name=ID`);
-        continue;
-      }
+      if (parts.length !== 2 || !parts[0] || !parts[1]) { reply(`❌ Invalid: "${room}". Use Name=ID`); continue; }
       addRoom(parts[0], parts[1]);
       reply(`✅ Added room: ${parts[0]}=${parts[1]}`);
     }
@@ -956,12 +972,8 @@ async function handleParentCommand(content, senderName, callerAccount) {
     const roomsToRemove = removeRoomMatch[1].split(",");
     for (const room of roomsToRemove) {
       const name = room.split(/[:=]/)[0].trim();
-      if (ROOM_LIST.has(name)) {
-        removeRoom(name);
-        reply(`✅ Removed room: ${name}`);
-      } else {
-        reply(`❌ Room "${name}" not found`);
-      }
+      if (ROOM_LIST.has(name)) { removeRoom(name); reply(`✅ Removed room: ${name}`); }
+      else { reply(`❌ Room "${name}" not found`); }
     }
     return;
   }
@@ -973,56 +985,73 @@ async function handleParentCommand(content, senderName, callerAccount) {
 
   // ══════════════════════════════════════════════════════════
   //  FLOOD SYSTEM
+  //  |flood <room> <text> $aa  → all sub-accounts flood
+  //  |autoflood <room> $aa     → all sub-accounts auto-flood
+  //  |flood stop $aa           → stop all sub-account floods
   // ══════════════════════════════════════════════════════════
 
-  // Custom flood: |flood 228 Hello World! $acc
   const customFloodMatch = cmd.match(/^\|flood\s+(\d+)\s+(.+)/i);
   if (customFloodMatch) {
     const roomId = customFloodMatch[1];
     const floodText = customFloodMatch[2].trim();
-    if (targetAccounts.length === 0) {
-      reply(`❌ Please specify account: |flood ${roomId} <text> $username`);
+
+    const floodTargets = isAllAccounts
+      ? getAllSubAccounts()
+      : targetAccounts.length > 0 ? targetAccounts : null;
+
+    if (!floodTargets) {
+      reply(`❌ Specify account: |flood ${roomId} <text> $username  or  $aa for all`);
       return;
     }
-    for (const acc of targetAccounts) {
+    if (floodTargets.length === 0) { reply(`❌ No sub-accounts logged in`); return; }
+
+    for (const acc of floodTargets) {
       if (acc.startCustomFlood(roomId, floodText)) {
-        reply(`🌊 CUSTOM FLOOD STARTED by @${acc.username}\nRoom: ${roomId}\nText: "${floodText}"\nSpeed: 100ms/msg`);
+        reply(`🌊 CUSTOM FLOOD by @${acc.username}\nRoom: ${roomId} | Text: "${floodText}"`);
       }
     }
+    if (isAllAccounts) reply(`🌊 Custom flood started on ${floodTargets.length} accounts`);
     return;
   }
 
-  // Auto flood: |autoflood 228 $acc
   const autoFloodMatch = cmd.match(/^\|autoflood\s+(\d+)/i);
   if (autoFloodMatch) {
     const roomId = autoFloodMatch[1];
-    if (targetAccounts.length === 0) {
-      reply(`❌ Please specify account: |autoflood ${roomId} $username`);
+
+    const floodTargets = isAllAccounts
+      ? getAllSubAccounts()
+      : targetAccounts.length > 0 ? targetAccounts : null;
+
+    if (!floodTargets) {
+      reply(`❌ Specify account: |autoflood ${roomId} $username  or  $aa for all`);
       return;
     }
-    for (const acc of targetAccounts) {
+    if (floodTargets.length === 0) { reply(`❌ No sub-accounts logged in`); return; }
+
+    let started = 0;
+    for (const acc of floodTargets) {
       if (acc.startAutoFlood(roomId)) {
-        reply(`🌊 AUTO FLOOD STARTED by @${acc.username}\nRoom: ${roomId}\nMessages: ${acc.floodMessages.length} from flood.txt`);
+        reply(`🌊 AUTO FLOOD by @${acc.username}\nRoom: ${roomId} | ${acc.floodMessages.length} msgs from flood.txt`);
+        started++;
       } else {
-        reply(`❌ Failed to start auto flood for @${acc.username} — check flood.txt`);
+        reply(`❌ @${acc.username}: failed — check flood.txt`);
       }
     }
+    if (isAllAccounts && started > 0) reply(`🌊 Auto flood started on ${started} accounts`);
     return;
   }
 
-  // Stop flood: |flood stop $acc
   if (/^\|flood\s+stop/i.test(cmd)) {
-    if (targetAccounts.length > 0) {
-      for (const acc of targetAccounts) acc.stopFlood();
-      reply(`🛑 FLOOD STOPPED for ${targetAccounts.map((a) => `@${a.username}`).join(", ")}`);
-    } else {
-      target.stopFlood();
-      reply(`🛑 FLOOD STOPPED for @${target.username}`);
-    }
+    const stopTargets = isAllAccounts
+      ? getAllSubAccounts()
+      : targetAccounts.length > 0 ? targetAccounts : [target];
+
+    for (const acc of stopTargets) acc.stopFlood();
+    const names = stopTargets.map((a) => `@${a.username}`).join(", ");
+    reply(`🛑 FLOOD STOPPED: ${names}`);
     return;
   }
 
-  // Reload flood.txt: |flood reload
   if (/^\|flood\s+reload/i.test(cmd)) {
     const messages = loadFloodTexts();
     reply(`✅ Reloaded ${messages.length} messages from flood.txt`);
@@ -1070,11 +1099,9 @@ async function handleParentCommand(content, senderName, callerAccount) {
   //  FEATURE TOGGLES
   // ══════════════════════════════════════════════════════════
 
-  // Voucher
   if (/^\|vp\s+on/i.test(cmd)) { target.voucherOn = true; reply(`✅ Voucher ON for @${target.username} 🎁`); return; }
   if (/^\|vp\s+off/i.test(cmd)) { target.voucherOn = false; reply(`⛔ Voucher OFF for @${target.username}`); return; }
 
-  // Auto-welcome (per-room support)
   const awOnMatch = cmd.match(/^\|aw\s+on(?:\s+(\d+))?/i);
   if (awOnMatch) {
     const roomId = awOnMatch[1];
@@ -1105,7 +1132,6 @@ async function handleParentCommand(content, senderName, callerAccount) {
     return;
   }
 
-  // Per-room or global welcome message
   const awMsgMatch = cmd.match(/^\|aw_msg\s+(?:#(\d+)\s+)?(.+)/i);
   if (awMsgMatch) {
     const roomId = awMsgMatch[1];
@@ -1115,12 +1141,11 @@ async function handleParentCommand(content, senderName, callerAccount) {
       reply(`✅ @${target.username} → Welcome message for room ${roomId}:\n"${message}"`);
     } else {
       target.awTemplate = message;
-      reply(`✅ @${target.username} → Default welcome message:\n"${message}"`);
+      reply(`✅ @${target.username} → Default welcome:\n"${message}"`);
     }
     return;
   }
 
-  // Auto-reply
   if (/^\|ar\s+on/i.test(cmd)) { target.autoReplyOn = true; reply(`✅ Auto-reply ON for @${target.username} 💬`); return; }
   if (/^\|ar\s+off/i.test(cmd)) { target.autoReplyOn = false; reply(`⛔ Auto-reply OFF for @${target.username}`); return; }
 
@@ -1227,32 +1252,92 @@ async function handleParentCommand(content, senderName, callerAccount) {
   // ══════════════════════════════════════════════════════════
 
   if (/^\|status/i.test(cmd)) {
+    const motherAcc = accounts.get((USERNAME || "").toLowerCase());
     const parents = [...PARENT_USERS].join(", ");
     const subParents = [...SUB_PARENT_USERS].join(", ") || "none";
-    const acctStatus = [...accounts.values()].map((a) => a.statusText()).join("\n\n");
-    reply(`📊 Bot Status\nParents: [${parents}]\nSub-Parents: [${subParents}]\n\n${acctStatus}`);
+    const motherStatus = motherAcc ? motherAcc.statusText() : `👑 @${USERNAME} (not found)`;
+    const subStatus = [...accounts.values()]
+      .filter((a) => !isMother(a.username))
+      .map((a) => a.statusText())
+      .join("\n\n");
+
+    let statusMsg = `📊 Bot Status\n`;
+    statusMsg += `Mother : @${USERNAME}\n`;
+    statusMsg += `Parents: [${parents}]\n`;
+    statusMsg += `Sub-Parents: [${subParents}]\n\n`;
+    statusMsg += `${motherStatus}`;
+    if (subStatus) statusMsg += `\n\n${subStatus}`;
+    reply(statusMsg);
     return;
   }
 
   if (/^\|help/i.test(cmd)) {
-    let helpText = `📖 Commands (use $account or @account to target):\n\n`;
-    helpText += `👥 Accounts:\n  |lnu user:pass  or  |lnu u1:p1;u2:p2\n  |ltu user\n  |accounts\n\n`;
-    helpText += `👫 Friends:\n  |sf <user>\n  |af <id>\n  |fr\n  |balance\n\n`;
-    helpText += `🏠 Rooms:\n  |jr <id> $acc1 $acc2\n  |lr <id/all>\n  |tr <id> <msg>\n\n`;
-    helpText += `🗺️ Room List:\n  |addroom Name=ID  (comma-separated)\n  |removeroom Name\n  |listroom\n\n`;
-    helpText += `🌊 Flood:\n  |flood <room> <text> $acc\n  |autoflood <room> $acc\n  |flood stop $acc\n  |flood reload\n\n`;
-    helpText += `📝 Auto-Text (at.txt):\n  |at on <room_id>\n  |at off [room_id]\n  |at interval <min>\n  |at reload\n  |at status\n\n`;
-    helpText += `👋 Auto-welcome:\n  |aw on [room_id]\n  |aw off [room_id]\n  |aw_msg <text>  (use {username})\n  |aw_msg #<room_id> <text>\n\n`;
-    helpText += `💬 Auto-reply:\n  |ar on/off\n\n`;
-    helpText += `🎁 Voucher:\n  |vp on/off\n\n`;
+    let helpText = `📖 Commands\n`;
+    helpText += `  $aa = all sub-accounts (not mother)\n`;
+    helpText += `  $name = specific account\n\n`;
+
+    helpText += `👥 Accounts (parent only):\n`;
+    helpText += `  |lnu user:pass  or  |lnu u1:p1;u2:p2\n`;
+    helpText += `  |ltu user\n`;
+    helpText += `  |accounts\n\n`;
+
+    helpText += `🏠 Rooms:\n`;
+    helpText += `  |jr <id> $aa         → all sub-accs join\n`;
+    helpText += `  |jr <id> $acc        → specific acc joins\n`;
+    helpText += `  |lr <id> $aa         → all sub-accs in that room leave\n`;
+    helpText += `  |lr all $acc\n`;
+    helpText += `  |tr <id> <msg> $acc\n`;
+    helpText += `  |addroom Name=ID\n`;
+    helpText += `  |removeroom Name\n`;
+    helpText += `  |listroom\n\n`;
+
+    helpText += `🌊 Flood:\n`;
+    helpText += `  |flood <room> <text> $aa     → all sub-accs\n`;
+    helpText += `  |flood <room> <text> $acc    → specific acc\n`;
+    helpText += `  |autoflood <room> $aa        → all sub-accs\n`;
+    helpText += `  |autoflood <room> $acc\n`;
+    helpText += `  |flood stop $aa\n`;
+    helpText += `  |flood stop $acc\n`;
+    helpText += `  |flood reload\n\n`;
+
+    helpText += `📝 Auto-Text (at.txt):\n`;
+    helpText += `  |at on <room_id> $acc\n`;
+    helpText += `  |at off [room_id] $acc\n`;
+    helpText += `  |at interval <min> $acc\n`;
+    helpText += `  |at reload $acc\n`;
+    helpText += `  |at status $acc\n\n`;
+
+    helpText += `👋 Auto-welcome:\n`;
+    helpText += `  |aw on [room_id] $acc\n`;
+    helpText += `  |aw off [room_id] $acc\n`;
+    helpText += `  |aw_msg <text>  (use {username})\n`;
+    helpText += `  |aw_msg #<room_id> <text>\n\n`;
+
+    helpText += `💬 Auto-reply:\n`;
+    helpText += `  |ar on/off $acc\n\n`;
+
+    helpText += `🎁 Voucher:\n`;
+    helpText += `  |vp on/off $acc\n\n`;
+
+    helpText += `👫 Friends:\n`;
+    helpText += `  |sf <user> $acc  |af <id> $acc\n`;
+    helpText += `  |fr $acc  |balance $acc\n\n`;
 
     if (isFullParent) {
-      helpText += `⚙️ Parent Only:\n  |ap <user>  |rp <user>\n  |asp <user>  |rsp <user>\n\n`;
+      helpText += `⚙️ Parent Only:\n`;
+      helpText += `  |ap <user>  |rp <user>\n`;
+      helpText += `  |asp <user>  |rsp <user>\n\n`;
     }
 
-    helpText += `📊 Info:\n  |status\n  |help\n\n`;
-    helpText += `🤖 AI:\n  /a <question>  (in PM or room)\n\n`;
-    helpText += `💡 Files:\n  at.txt → Auto-text messages\n  flood.txt → Auto flood messages`;
+    helpText += `📊 Info:\n`;
+    helpText += `  |status  |help\n\n`;
+
+    helpText += `🔒 Access:\n`;
+    helpText += `  Parents   → PM + Room commands\n`;
+    helpText += `  Sub-parents → PM only\n`;
+    helpText += `  $aa       → parents only, skips mother\n\n`;
+
+    helpText += `🤖 AI: /a <question>  (PM or room)`;
     reply(helpText);
     return;
   }
@@ -1264,22 +1349,15 @@ async function handleParentCommand(content, senderName, callerAccount) {
 //  MAIN
 // ══════════════════════════════════════════════════════════════
 async function main() {
-  if (!USERNAME) {
-    console.error("❌ MIG66_USERNAME missing");
-    process.exit(1);
-  }
-  if (!TOKEN && !PASSWORD) {
-    console.error("❌ MIG66_TOKEN or MIG66_PASSWORD missing");
-    process.exit(1);
-  }
+  if (!USERNAME) { console.error("❌ MIG66_USERNAME missing"); process.exit(1); }
+  if (!TOKEN && !PASSWORD) { console.error("❌ MIG66_TOKEN or MIG66_PASSWORD missing"); process.exit(1); }
   if (AI_PROVIDER === "mistral" && !process.env.MISTRAL_API_KEY) {
-    console.error("❌ MISTRAL_API_KEY missing");
-    process.exit(1);
+    console.error("❌ MISTRAL_API_KEY missing"); process.exit(1);
   }
 
   console.log("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
-  console.log("  mig66 AI Bot  ✅ Full Edition v3.0");
-  console.log(`  Main user   : ${USERNAME}`);
+  console.log("  mig66 AI Bot  ✅ Full Edition v4.0");
+  console.log(`  Mother      : ${USERNAME}`);
   console.log(`  Room        : ${ROOM_ID}`);
   console.log(`  Trigger     : ${TRIGGER}`);
   console.log(`  AI          : ${AI_PROVIDER}`);
