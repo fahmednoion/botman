@@ -55,6 +55,8 @@ const SUB_PARENT_USERS = new Set(
 );
 
 function isParent(username) {
+  // Mother account is always treated as a full parent
+  if (isMother(username)) return true;
   return PARENT_USERS.has((username || "").toLowerCase());
 }
 function isSubParent(username) {
@@ -289,7 +291,7 @@ class BotAccount {
       this.token = data?.token || data?.data?.token;
 
       if (!this.token) {
-        this.log(`❌ Login failed (${resp.status}): ${JSON.stringify(data).slice(0, 100)}`);
+        this.log(`❌ Login failed (${resp.status}): ${JSON.stringify(data).slice(0, 200)}`);
         return false;
       }
 
@@ -402,6 +404,29 @@ class BotAccount {
 
   async getFriendRequests() {
     return await this.api("GET", "/api/friends/requests");
+  }
+
+  async getFriendsList() {
+    return await this.api("GET", "/api/friends");
+  }
+
+  async getAccount() {
+    return await this.api("GET", "/api/account");
+  }
+
+  async getPinStatus() {
+    return await this.api("GET", "/api/account/pin/status");
+  }
+
+  async transferCoins(toUsername, amount, pin, sendTag = false) {
+    const r = await this.api("POST", "/api/account/transfer", {
+      to_username: toUsername,
+      amount: Number(amount),
+      pin: String(pin),
+      send_tag: sendTag,
+    });
+    this.log(`💸 Transfer ${amount} coins → @${toUsername}: ${r.status}`);
+    return r;
   }
 
   // ── Voucher auto-pick ─────────────────────────────────────
@@ -765,17 +790,29 @@ function getAllSubAccounts() {
 //  sourceRoomId: room the command came from (when source=room)
 // ══════════════════════════════════════════════════════════════
 async function handleCommand(content, senderName, callerAccount, source, sourceRoomId = null) {
-  let cmd = content.trim();
+  // ── BUG FIX: Work on a copy so we can strip $ tokens later
+  //    but check permissions on the ORIGINAL cmd first
+  const originalCmd = content.trim();
+  let cmd = originalCmd;
+
   const isFullParent = isParent(senderName);
-  const isSubP = isSubParent(senderName);
+  const isSubP = isSubParent(senderName) && !isFullParent;
 
   // Sub-parents can only use PM
-  if (isSubP && !isFullParent && source === "room") return;
+  if (isSubP && source === "room") return;
 
   console.log(`\n[${isFullParent ? "👑 PARENT" : "👤 SUB-PARENT"}][${source.toUpperCase()}] @${senderName} → "${cmd}"`);
 
   // ── Reply helper: PM back the sender always ───────────────
   const reply = (text) => callerAccount.sendPrivate(senderName, text);
+
+  // ── PARENT-ONLY command guard (check BEFORE stripping $) ──
+  // BUG FIX: must check on original cmd before $ tokens are removed
+  const parentOnlyPattern = /^\|(ap|rp|asp|rsp|lnu|ltu)\b/i;
+  if (parentOnlyPattern.test(cmd) && !isFullParent) {
+    reply(`❌ Permission denied. Only full parents can use this command.`);
+    return;
+  }
 
   // ── Resolve target accounts ───────────────────────────────
   //   $aa  = all sub-accounts (not mother)
@@ -789,7 +826,6 @@ async function handleCommand(content, senderName, callerAccount, source, sourceR
     for (const match of dollarMatches) {
       const token = match[1].toLowerCase();
       if (token === "aa") {
-        // $aa = all sub-accounts
         isAllAccounts = true;
         targetAccounts = getAllSubAccounts();
         if (targetAccounts.length === 0) {
@@ -804,6 +840,7 @@ async function handleCommand(content, senderName, callerAccount, source, sourceR
         return;
       }
     }
+    // Strip $ tokens from cmd AFTER permission checks
     cmd = cmd.replace(/\s*\$\w+/g, "").trim();
   } else {
     // Legacy @username targeting
@@ -821,15 +858,7 @@ async function handleCommand(content, senderName, callerAccount, source, sourceR
 
   const target = targetAccounts.length > 0 ? targetAccounts[0] : callerAccount;
 
-  // ── PARENT-ONLY command guard ─────────────────────────────
-  const parentOnlyPattern = /^\|(ap|rp|asp|rsp|lnu|ltu)\b/i;
-  if (parentOnlyPattern.test(cmd) && !isFullParent) {
-    reply(`❌ Permission denied. Only full parents can use this command.`);
-    return;
-  }
-
   // ── $aa guard for sensitive commands ─────────────────────
-  //  sub-parents cannot use $aa for flood/room join/leave
   const aaRestrictedPattern = /^\|(jr|lr|flood|autoflood)\b/i;
   if (isAllAccounts && aaRestrictedPattern.test(cmd) && !isFullParent) {
     reply(`❌ Sub-parents cannot use $aa with this command. Only full parents can.`);
@@ -837,17 +866,20 @@ async function handleCommand(content, senderName, callerAccount, source, sourceR
   }
 
   // ══════════════════════════════════════════════════════════
-  //  ACCOUNT MANAGEMENT  (parent only)
+  //  ACCOUNT MANAGEMENT  (parent only — already guarded above)
   // ══════════════════════════════════════════════════════════
 
+  // BUG FIX: |lnu parsing — split only on first colon per credential
+  // This correctly handles passwords that contain colons or special chars
   const multiLoginMatch = cmd.match(/^\|lnu\s+(.+)/i);
   if (multiLoginMatch) {
     const rawInput = multiLoginMatch[1].trim();
+    // Multiple accounts separated by semicolons: user1:pass1;user2:pass2
     const credentials = rawInput.split(";").map((s) => s.trim()).filter(Boolean);
     let successCount = 0, failCount = 0;
 
     for (const cred of credentials) {
-      // Split only on the FIRST colon — passwords may contain colons
+      // Split only on the FIRST colon — passwords may contain colons or special chars (#@! etc)
       const colonIdx = cred.indexOf(":");
       if (colonIdx === -1) {
         reply(`❌ Invalid format: "${cred}"\nUse: |lnu username:password`);
@@ -912,16 +944,12 @@ async function handleCommand(content, senderName, callerAccount, source, sourceR
 
   // ══════════════════════════════════════════════════════════
   //  ROOM MANAGEMENT
-  //  |jr <id> $aa  →  all sub-accounts join (not mother)
-  //  |jr <id> $acc →  specific account joins
-  //  |lr <id> $aa  →  all sub-accounts that are in that room leave
   // ══════════════════════════════════════════════════════════
 
   const joinMatch = cmd.match(/^\|jr\s+(\d+)/i);
   if (joinMatch) {
     const roomId = joinMatch[1];
     if (isAllAccounts) {
-      // $aa: all sub-accounts join, skip mother
       const subAccs = getAllSubAccounts();
       if (subAccs.length === 0) { reply(`❌ No sub-accounts logged in`); return; }
       for (const acc of subAccs) acc.joinRoom(roomId);
@@ -954,7 +982,6 @@ async function handleCommand(content, senderName, callerAccount, source, sourceR
   if (leaveMatch) {
     const roomId = leaveMatch[1];
     if (isAllAccounts) {
-      // $aa: only accounts that are actually in that room leave
       const subAccs = getAllSubAccounts().filter((a) => a.joinedRooms.has(Number(roomId)));
       if (subAccs.length === 0) { reply(`⚠️ No sub-accounts are in room ${roomId}`); return; }
       for (const acc of subAccs) acc.leaveRoom(roomId);
@@ -1007,9 +1034,6 @@ async function handleCommand(content, senderName, callerAccount, source, sourceR
 
   // ══════════════════════════════════════════════════════════
   //  FLOOD SYSTEM
-  //  |flood <room> <text> $aa  → all sub-accounts flood
-  //  |autoflood <room> $aa     → all sub-accounts auto-flood
-  //  |flood stop $aa           → stop all sub-account floods
   // ══════════════════════════════════════════════════════════
 
   const customFloodMatch = cmd.match(/^\|flood\s+(\d+)\s+(.+)/i);
@@ -1084,36 +1108,166 @@ async function handleCommand(content, senderName, callerAccount, source, sourceR
   //  FRIENDS
   // ══════════════════════════════════════════════════════════
 
+  // Send friend request: |sf <username> [$acc]
   const sendFriendMatch = cmd.match(/^\|sf\s+(\w+)/i);
   if (sendFriendMatch) {
     const r = await target.sendFriendRequest(sendFriendMatch[1]);
-    reply(`${r.status < 400 ? "✅" : "❌"} Friend request to @${sendFriendMatch[1]} from @${target.username}: ${JSON.stringify(r.data).slice(0, 80)}`);
+    const ok = r.status < 400;
+    const msg = r.data?.message || r.data?.data?.message || JSON.stringify(r.data).slice(0, 80);
+    reply(`${ok ? "✅" : "❌"} Friend request → @${sendFriendMatch[1]} from @${target.username}: ${msg}`);
     return;
   }
 
+  // Accept friend request by ID: |af <request_id> [$acc]
   const acceptMatch = cmd.match(/^\|af\s+(\d+)/i);
   if (acceptMatch) {
     const r = await target.acceptFriendRequest(acceptMatch[1]);
-    reply(`${r.status < 400 ? "✅" : "❌"} Accepted #${acceptMatch[1]} on @${target.username}: ${JSON.stringify(r.data).slice(0, 80)}`);
+    const ok = r.status < 400;
+    const msg = r.data?.message || r.data?.data?.message || JSON.stringify(r.data).slice(0, 80);
+    reply(`${ok ? "✅" : "❌"} Accepted request #${acceptMatch[1]} on @${target.username}: ${msg}`);
     return;
   }
 
-  if (/^\|fr/i.test(cmd)) {
+  // Accept ALL pending friend requests: |aaf [$acc]
+  if (/^\|aaf/i.test(cmd)) {
     const r = await target.getFriendRequests();
     const requests = Array.isArray(r.data) ? r.data : (r.data?.requests || r.data?.data || []);
     if (!requests.length) { reply(`📭 No pending requests on @${target.username}`); return; }
-    const list = requests.slice(0, 10)
-      .map((rq) => `  ID:${rq.id || rq.request_id} from @${rq.username || rq.sender?.username || "?"}`)
-      .join("\n");
-    reply(`📬 Requests on @${target.username} (${requests.length}):\n${list}`);
+    reply(`⏳ Accepting ${requests.length} request(s) on @${target.username}...`);
+    let accepted = 0, failed = 0;
+    for (const rq of requests) {
+      const rid = rq.id || rq.request_id;
+      if (!rid) { failed++; continue; }
+      const ar = await target.acceptFriendRequest(rid);
+      if (ar.status < 400) { accepted++; }
+      else { failed++; }
+      // Small delay to avoid rate limiting
+      await new Promise((res) => setTimeout(res, 300));
+    }
+    reply(`✅ @${target.username} — Accepted: ${accepted}, Failed: ${failed}`);
     return;
   }
 
-  if (/^\|balance/i.test(cmd)) {
-    if (target.balance !== null) { reply(`💰 @${target.username}: ${target.balance} cents`); return; }
-    const r = await target.api("GET", "/api/profile/me");
-    const b = r.data?.balance_cents || r.data?.data?.balance_cents || "unknown";
-    reply(`💰 @${target.username}: ${b} cents`);
+  // List pending friend requests: |fr [$acc]
+  if (/^\|fr\b/i.test(cmd)) {
+    const r = await target.getFriendRequests();
+    const requests = Array.isArray(r.data) ? r.data : (r.data?.requests || r.data?.data || []);
+    if (!requests.length) { reply(`📭 No pending requests on @${target.username}`); return; }
+    const list = requests.slice(0, 15)
+      .map((rq) => `  ID:${rq.id || rq.request_id} from @${rq.username || rq.sender?.username || "?"}`)
+      .join("\n");
+    reply(`📬 Pending requests on @${target.username} (${requests.length}):\n${list}`);
+    return;
+  }
+
+  // List friends: |fl [$acc]
+  if (/^\|fl\b/i.test(cmd)) {
+    const r = await target.getFriendsList();
+    const friends = Array.isArray(r.data) ? r.data : (r.data?.friends || r.data?.data || []);
+    if (!friends.length) { reply(`📭 @${target.username} has no friends listed`); return; }
+    const list = friends.slice(0, 20)
+      .map((f) => `  @${f.username || f.friend?.username || "?"}`)
+      .join("\n");
+    reply(`👥 Friends of @${target.username} (${friends.length}):\n${list}`);
+    return;
+  }
+
+  // Balance: |balance [$acc]
+  if (/^\|balance\b/i.test(cmd)) {
+    const r = await target.getAccount();
+    const b = r.data?.balance_cents ?? r.data?.data?.balance_cents ?? target.balance ?? "unknown";
+    if (typeof b === "number") target.balance = b;
+    reply(`💰 @${target.username}: ${b} coins`);
+    return;
+  }
+
+  // ══════════════════════════════════════════════════════════
+  //  COIN TRANSFER
+  //  |send <to_username> <amount> <pin> [$acc]
+  //  |send faysal 100 333666 $firefox
+  //
+  //  |sendall <to_username> <amount> <pin>
+  //    → sends from ALL sub-accounts (useful for collecting coins)
+  //
+  //  |pincheck [$acc]   → check if PIN is set on account
+  // ══════════════════════════════════════════════════════════
+
+  // PIN status check: |pincheck [$acc]
+  if (/^\|pincheck\b/i.test(cmd)) {
+    const r = await target.getPinStatus();
+    const hasPin = r.data?.has_pin ?? r.data?.data?.has_pin ?? r.data?.pin_set ?? "unknown";
+    reply(`🔐 @${target.username} PIN status: ${hasPin === true ? "✅ PIN is set" : hasPin === false ? "❌ No PIN set" : JSON.stringify(r.data).slice(0, 80)}`);
+    return;
+  }
+
+  // Transfer coins: |send <to> <amount> <pin> [$acc]
+  const sendCoinsMatch = cmd.match(/^\|send\s+(\w+)\s+(\d+)\s+(\S+)/i);
+  if (sendCoinsMatch) {
+    const [, toUser, amount, pin] = sendCoinsMatch;
+
+    if (isAllAccounts) {
+      // |send faysal 100 333666 $aa  → all sub-accounts each send
+      const subAccs = getAllSubAccounts();
+      if (subAccs.length === 0) { reply(`❌ No sub-accounts logged in`); return; }
+      reply(`⏳ Sending ${amount} coins → @${toUser} from ${subAccs.length} accounts...`);
+      let ok = 0, fail = 0;
+      for (const acc of subAccs) {
+        const r = await acc.transferCoins(toUser, amount, pin);
+        if (r.status < 400) {
+          ok++;
+          const msg = r.data?.message || r.data?.data?.message || "OK";
+          reply(`  ✅ @${acc.username} → @${toUser} (${amount} coins): ${msg}`);
+        } else {
+          fail++;
+          const msg = r.data?.message || r.data?.data?.message || r.data?.error || JSON.stringify(r.data).slice(0, 80);
+          reply(`  ❌ @${acc.username} failed: ${msg}`);
+        }
+        await new Promise((res) => setTimeout(res, 400));
+      }
+      reply(`📊 Transfer done: ${ok} success, ${fail} failed`);
+    } else {
+      // Single account transfer
+      reply(`⏳ Sending ${amount} coins from @${target.username} → @${toUser}...`);
+      const r = await target.transferCoins(toUser, amount, pin);
+      if (r.status < 400) {
+        const msg = r.data?.message || r.data?.data?.message || "Transfer successful";
+        const newBal = r.data?.balance_cents ?? r.data?.data?.balance_cents;
+        let replyMsg = `✅ @${target.username} → @${toUser}: ${amount} coins sent!\n  ${msg}`;
+        if (newBal !== undefined) replyMsg += `\n  New balance: ${newBal} coins`;
+        reply(replyMsg);
+      } else {
+        const msg = r.data?.message || r.data?.data?.message || r.data?.error || JSON.stringify(r.data).slice(0, 120);
+        reply(`❌ Transfer failed from @${target.username}: ${msg}`);
+      }
+    }
+    return;
+  }
+
+  // Collect all coins to one account: |collect <to_username> <amount_each> <pin>
+  // Shorthand for sending from all sub-accounts to a single destination
+  const collectMatch = cmd.match(/^\|collect\s+(\w+)\s+(\d+)\s+(\S+)/i);
+  if (collectMatch) {
+    if (!isFullParent) { reply(`❌ Only full parents can use |collect`); return; }
+    const [, toUser, amount, pin] = collectMatch;
+    const subAccs = getAllSubAccounts();
+    if (subAccs.length === 0) { reply(`❌ No sub-accounts logged in`); return; }
+    reply(`⏳ Collecting ${amount} coins each from ${subAccs.length} sub-accounts → @${toUser}...`);
+    let ok = 0, fail = 0, totalSent = 0;
+    for (const acc of subAccs) {
+      const r = await acc.transferCoins(toUser, amount, pin);
+      if (r.status < 400) {
+        ok++;
+        totalSent += Number(amount);
+        const msg = r.data?.message || r.data?.data?.message || "OK";
+        reply(`  ✅ @${acc.username} → ${amount} coins: ${msg}`);
+      } else {
+        fail++;
+        const msg = r.data?.message || r.data?.data?.message || r.data?.error || JSON.stringify(r.data).slice(0, 80);
+        reply(`  ❌ @${acc.username}: ${msg}`);
+      }
+      await new Promise((res) => setTimeout(res, 400));
+    }
+    reply(`📊 Collect done: ${ok} success, ${fail} failed\n  Total sent: ${totalSent} coins → @${toUser}`);
     return;
   }
 
@@ -1238,7 +1392,7 @@ async function handleCommand(content, senderName, callerAccount, source, sourceR
   }
 
   // ══════════════════════════════════════════════════════════
-  //  PARENT MANAGEMENT (full parents only)
+  //  PARENT MANAGEMENT (full parents only — already guarded above)
   // ══════════════════════════════════════════════════════════
 
   const addSubParentMatch = cmd.match(/^\|asp\s+(\w+)/i);
@@ -1299,14 +1453,15 @@ async function handleCommand(content, senderName, callerAccount, source, sourceR
     helpText += `  $name = specific account\n\n`;
 
     helpText += `👥 Accounts (parent only):\n`;
-    helpText += `  |lnu user:pass  or  |lnu u1:p1;u2:p2\n`;
+    helpText += `  |lnu user:pass\n`;
+    helpText += `  |lnu u1:p1;u2:p2  (multi)\n`;
     helpText += `  |ltu user\n`;
     helpText += `  |accounts\n\n`;
 
     helpText += `🏠 Rooms:\n`;
     helpText += `  |jr <id> $aa         → all sub-accs join\n`;
     helpText += `  |jr <id> $acc        → specific acc joins\n`;
-    helpText += `  |lr <id> $aa         → all sub-accs in that room leave\n`;
+    helpText += `  |lr <id> $aa         → all sub-accs leave\n`;
     helpText += `  |lr all $acc\n`;
     helpText += `  |tr <id> <msg> $acc\n`;
     helpText += `  |addroom Name=ID\n`;
@@ -1314,9 +1469,9 @@ async function handleCommand(content, senderName, callerAccount, source, sourceR
     helpText += `  |listroom\n\n`;
 
     helpText += `🌊 Flood:\n`;
-    helpText += `  |flood <room> <text> $aa     → all sub-accs\n`;
-    helpText += `  |flood <room> <text> $acc    → specific acc\n`;
-    helpText += `  |autoflood <room> $aa        → all sub-accs\n`;
+    helpText += `  |flood <room> <text> $aa\n`;
+    helpText += `  |flood <room> <text> $acc\n`;
+    helpText += `  |autoflood <room> $aa\n`;
     helpText += `  |autoflood <room> $acc\n`;
     helpText += `  |flood stop $aa\n`;
     helpText += `  |flood stop $acc\n`;
@@ -1342,8 +1497,18 @@ async function handleCommand(content, senderName, callerAccount, source, sourceR
     helpText += `  |vp on/off $acc\n\n`;
 
     helpText += `👫 Friends:\n`;
-    helpText += `  |sf <user> $acc  |af <id> $acc\n`;
-    helpText += `  |fr $acc  |balance $acc\n\n`;
+    helpText += `  |sf <user> [$acc]     → send friend request\n`;
+    helpText += `  |af <id> [$acc]       → accept by request ID\n`;
+    helpText += `  |aaf [$acc]           → accept ALL pending\n`;
+    helpText += `  |fr [$acc]            → list pending requests\n`;
+    helpText += `  |fl [$acc]            → list friends\n`;
+    helpText += `  |balance [$acc]       → show balance\n`;
+    helpText += `  |pincheck [$acc]      → check if PIN is set\n\n`;
+
+    helpText += `💸 Coin Transfer:\n`;
+    helpText += `  |send <to> <amt> <pin> [$acc]   → single acc send\n`;
+    helpText += `  |send <to> <amt> <pin> $aa      → all sub-accs send\n`;
+    helpText += `  |collect <to> <amt> <pin>        → all sub-accs → one dest\n\n`;
 
     if (isFullParent) {
       helpText += `⚙️ Parent Only:\n`;
@@ -1355,9 +1520,9 @@ async function handleCommand(content, senderName, callerAccount, source, sourceR
     helpText += `  |status  |help\n\n`;
 
     helpText += `🔒 Access:\n`;
-    helpText += `  Parents   → PM + Room commands\n`;
+    helpText += `  Parents     → PM + Room commands\n`;
     helpText += `  Sub-parents → PM only\n`;
-    helpText += `  $aa       → parents only, skips mother\n\n`;
+    helpText += `  $aa         → parents only, skips mother\n\n`;
 
     helpText += `🤖 AI: /a <question>  (PM or room)`;
     reply(helpText);
@@ -1373,12 +1538,15 @@ async function handleCommand(content, senderName, callerAccount, source, sourceR
 async function main() {
   if (!USERNAME) { console.error("❌ MIG66_USERNAME missing"); process.exit(1); }
   if (!TOKEN && !PASSWORD) { console.error("❌ MIG66_TOKEN or MIG66_PASSWORD missing"); process.exit(1); }
+
+  // BUG FIX: MISTRAL_API_KEY missing is now a WARNING only, not a fatal error.
+  // The bot can still run without AI — commands still work.
   if (AI_PROVIDER === "mistral" && !process.env.MISTRAL_API_KEY) {
-    console.error("❌ MISTRAL_API_KEY missing"); process.exit(1);
+    console.warn("⚠️  MISTRAL_API_KEY not set — AI replies will be disabled. Bot will still run.");
   }
 
   console.log("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
-  console.log("  mig66 AI Bot  ✅ Full Edition v4.0");
+  console.log("  mig66 AI Bot  ✅ Full Edition v4.2");
   console.log(`  Mother      : ${USERNAME}`);
   console.log(`  Room        : ${ROOM_ID}`);
   console.log(`  Trigger     : ${TRIGGER}`);
