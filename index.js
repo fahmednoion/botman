@@ -77,7 +77,7 @@ const ROOM_LIST = new Map([
   ["Nepal", 3],
   ["Philippine", 4],
   ["Indonesia", 5],
-  ["Savages", 46],
+  ["Savages", 21],
   ["Bangladeshi", 20],
   ["Kolkata", 238],
   ["Faysal", 228],
@@ -591,83 +591,7 @@ class BotAccount {
   }
 
 
-  // ── LowCard Bot Auto-Play ────────────────────────────────
-  lcbHandleMessage(content, roomId) {
-    if (!this.lcbOn) return;
-    if (!this.lcbRooms.has(Number(roomId))) return;
-
-    const text = content.toLowerCase();
-    const rid = Number(roomId);
-
-    // Pattern 1: Idle — game available to start
-    // "LowCard Bot: Play Lowcard. Type !start to start a game."
-    if (text.includes('!start to start a game') || (text.includes('play lowcard') && text.includes('!start'))) {
-      const state = this.lcbState.get(rid) || 'idle';
-      if (state === 'idle') {
-        this.lcbState.set(rid, 'starting');
-        this.log('🃏 [LCB] Room ' + rid + ': Game available — sending !start');
-        setTimeout(() => {
-          if (this.lcbOn && this.lcbRooms.has(rid)) {
-            this.sendRoom(rid, '!start');
-          }
-        }, 800 + Math.floor(Math.random() * 500));
-      }
-      return;
-    }
-
-    // Pattern 2: Game started — join window open
-    // "LowCard Bot Started. !j to join, cost cents 200 [40 sec]"
-    if (text.includes('!j to join') || (text.includes('lowcard bot started') && text.includes('!j'))) {
-      this.lcbState.set(rid, 'joining');
-      this.log('🃏 [LCB] Room ' + rid + ': Join window open — sending !j');
-      setTimeout(() => {
-        if (this.lcbOn && this.lcbRooms.has(rid)) {
-          this.sendRoom(rid, '!j');
-          this.lcbState.set(rid, 'playing');
-        }
-      }, 600 + Math.floor(Math.random() * 400));
-      return;
-    }
-
-    // Pattern 3: Round started — draw card
-    // "LowCard Bot: Round#1. Players !d to draw [20 seconds]"
-    if ((text.includes('round#') || text.includes('round #')) && text.includes('!d to draw')) {
-      const roundMatch = content.match(/round#?\s*(\d+)/i);
-      const round = roundMatch ? roundMatch[1] : '?';
-      this.lcbState.set(rid, 'playing');
-      this.log('🃏 [LCB] Room ' + rid + ': Round ' + round + ' — sending !d');
-      setTimeout(() => {
-        if (this.lcbOn && this.lcbRooms.has(rid)) {
-          this.sendRoom(rid, '!d');
-        }
-      }, 700 + Math.floor(Math.random() * 600));
-      return;
-    }
-
-    // Pattern 4: Game ended — reset to idle
-    if (text.includes('lowcard bot') && (
-      text.includes('wins') || text.includes('winner') ||
-      text.includes('game over') || text.includes('no players') ||
-      text.includes('cancelled') || text.includes('ended')
-    )) {
-      this.log('🃏 [LCB] Room ' + rid + ': Game ended — reset to idle');
-      this.lcbState.set(rid, 'idle');
-      return;
-    }
-  }
-
-  lcbStatus() {
-    if (!this.lcbOn) return '🔴 OFF';
-    if (this.lcbRooms.size === 0) return '🟡 ON (no rooms set)';
-    const details = [...this.lcbRooms].map((rid) => {
-      const state = this.lcbState.get(rid) || 'idle';
-      const emoji = { idle: '💤', starting: '🚀', joining: '🙋', playing: '🃏' }[state] || '❓';
-      return rid + ':' + emoji + state;
-    }).join(', ');
-    return '🟢 ON [' + details + ']';
-  }
-
-    // ── Voucher auto-pick ─────────────────────────────────────
+  // ── Voucher auto-pick ─────────────────────────────────────
   tryPickVoucher(content, roomId) {
     if (!this.voucherOn) return false;
     if (!content.toLowerCase().includes("pick") || !content.toLowerCase().includes("code")) return false;
@@ -817,7 +741,6 @@ class BotAccount {
       `  Auto-reply  : ${this.autoReplyOn ? "🟢 ON" : "🔴 OFF"}\n` +
       `  Auto-text   : ${atStatus}\n` +
       `  Flood       : ${this.getFloodStatus()}\n` +
-      `  LowCard Bot : ${this.lcbStatus()}\n` +
       `  Balance     : ${bal}\n` +
       `  Uptime      : ${uptime}`
     );
@@ -893,9 +816,6 @@ class BotAccount {
       this.sendRoom(roomId, `@${senderName} ${reply}`);
       return;
     }
-
-    // LowCard Bot auto-play — check every room message
-    this.lcbHandleMessage(content, roomId);
 
     if (this.tryPickVoucher(content, roomId)) return;
 
@@ -1565,73 +1485,6 @@ async function handleCommand(content, senderName, callerAccount, source, sourceR
   }
 
   // ══════════════════════════════════════════════════════════
-  //  LOWCARD BOT AUTO-PLAY
-  //  |lcb on <room_id> [$acc/$aa]   → enable LCB auto-play in room
-  //  |lcb off <room_id> [$acc/$aa]  → disable for that room
-  //  |lcb off [$acc]                → disable all rooms
-  //  |lcb status [$acc]             → show current state
-  // ══════════════════════════════════════════════════════════
-
-  const lcbOnMatch = cmd.match(/^\|lcb\s+on\s+(\d+)/i);
-  if (lcbOnMatch) {
-    const roomId = Number(lcbOnMatch[1]);
-    const lcbTargets = isAllAccounts
-      ? getAllSubAccounts()
-      : targetAccounts.length > 0 ? targetAccounts : [target];
-
-    for (const acc of lcbTargets) {
-      // Must be in the room to play
-      if (!acc.joinedRooms.has(roomId)) {
-        acc.joinRoom(roomId);
-        reply(`⏳ @${acc.username} joining room ${roomId} for LCB...`);
-        // Give it a moment to join before enabling
-        await new Promise((r) => setTimeout(r, 1200));
-      }
-      acc.lcbOn = true;
-      acc.lcbRooms.add(roomId);
-      acc.lcbState.set(roomId, "idle");
-      reply(
-        `🃏 @${acc.username} → LowCard Bot ON for room ${roomId}\n` +
-        `  Will auto: !start → !j → !d\n` +
-        `  Watching for LowCard Bot messages...`
-      );
-    }
-    if (isAllAccounts) reply(`🃏 LCB enabled on ${lcbTargets.length} accounts for room ${roomId}`);
-    return;
-  }
-
-  const lcbOffMatch = cmd.match(/^\|lcb\s+off(?:\s+(\d+))?/i);
-  if (lcbOffMatch) {
-    const roomId = lcbOffMatch[1] ? Number(lcbOffMatch[1]) : null;
-    const lcbTargets = isAllAccounts
-      ? getAllSubAccounts()
-      : targetAccounts.length > 0 ? targetAccounts : [target];
-
-    for (const acc of lcbTargets) {
-      if (roomId) {
-        acc.lcbRooms.delete(roomId);
-        acc.lcbState.delete(roomId);
-        if (acc.lcbRooms.size === 0) acc.lcbOn = false;
-        reply(`⛔ @${acc.username} → LCB OFF for room ${roomId}`);
-      } else {
-        acc.lcbOn = false;
-        acc.lcbRooms.clear();
-        acc.lcbState.clear();
-        reply(`⛔ @${acc.username} → LCB OFF (all rooms)`);
-      }
-    }
-    return;
-  }
-
-  if (/^\|lcb\s+status/i.test(cmd)) {
-    const lcbTargets = targetAccounts.length > 0 ? targetAccounts : [target];
-    for (const acc of lcbTargets) {
-      reply(`🃏 LCB @${acc.username}: ${acc.lcbStatus()}`);
-    }
-    return;
-  }
-
-  // ══════════════════════════════════════════════════════════
   //  VOTE
   //  |vote <username> [$acc]       → vote for a user
   //  |vote <username> $aa          → all sub-accounts vote
@@ -2074,13 +1927,6 @@ async function handleCommand(content, senderName, callerAccount, source, sourceR
     helpText += `  |send <to> <amt> <pin> $aa      → all sub-accs send\n`;
     helpText += `  |collect <to> <amt> <pin>        → all sub-accs → one dest\n\n`;
 
-    helpText += `🃏 LowCard Bot Auto-Play:\n`;
-    helpText += `  |lcb on <room_id> [$acc/$aa]  → enable auto-play\n`;
-    helpText += `  |lcb off <room_id> [$acc/$aa] → disable for room\n`;
-    helpText += `  |lcb off [$acc]               → disable all rooms\n`;
-    helpText += `  |lcb status [$acc]            → show game state\n`;
-    helpText += `  (auto sends: !start → !j → !d)\n\n`;
-
     helpText += `🗳️ Vote:\n`;
     helpText += `  |vote <username> [$acc]          → vote for a user\n`;
     helpText += `  |vote <username> $aa             → all sub-accs vote\n\n`;
@@ -2135,7 +1981,7 @@ async function main() {
   }
 
   console.log("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
-  console.log("  mig66 AI Bot  ✅ Full Edition v4.5");
+  console.log("  mig66 AI Bot  ✅ Full Edition v4.4");
   console.log(`  Mother      : ${USERNAME}`);
   console.log(`  Room        : ${ROOM_ID}`);
   console.log(`  Trigger     : ${TRIGGER}`);
