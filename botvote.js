@@ -402,6 +402,82 @@ class BotAccount {
 
     return true;
   }
+  // ── Vote ──────────────────────────────────────────────────
+  async voteUser(username) {
+    const r = await this.api("POST", `/api/profile/${encodeURIComponent(username)}/vote`, {});
+    this.log(`🗳️ Vote → @${username}: ${r.status}`);
+    return r;
+  }
+
+  // ── Email ─────────────────────────────────────────────────
+  async sendEmail(toUsername, subject, body) {
+    const r = await this.api("POST", "/api/emails/send", {
+      to_username: toUsername,
+      subject,
+      body,
+    });
+    this.log(`📧 Email → @${toUsername} [${subject}]: ${r.status}`);
+    return r;
+  }
+
+  async getInbox(filter = "all", page = 1) {
+    return await this.api("GET", `/api/emails/inbox?filter=${filter}&page=${page}`);
+  }
+
+  // ── Daily XP login bonus ──────────────────────────────────
+  async claimDailyLogin() {
+    const r = await this.api("POST", "/api/xp/daily-login", {});
+    this.log(`🎯 Daily login XP claim: ${r.status}`);
+    return r;
+  }
+
+  // ── Register new account (no auth needed) ────────────────
+  async registerAccount(username, email, password, gender = "male", country = "Bangladesh") {
+    try {
+      const resp = await fetch(`${API_BASE}/api/auth/register`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Origin: "https://web.mig66.com",
+          Referer: "https://web.mig66.com/",
+          "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+          Accept: "application/json, text/plain, */*",
+          "Accept-Language": "en-US,en;q=0.9",
+          "sec-fetch-dest": "empty",
+          "sec-fetch-mode": "cors",
+          "sec-fetch-site": "same-site",
+        },
+        body: JSON.stringify({ username, email, password, confirm_password: password, gender, country }),
+      });
+      const text = await resp.text();
+      try { return { status: resp.status, data: JSON.parse(text) }; }
+      catch { return { status: resp.status, data: text }; }
+    } catch (e) { return { status: 500, data: e.message }; }
+  }
+
+  // ── Activate account (no auth needed) ────────────────────
+  async activateAccount(activationToken) {
+    try {
+      const resp = await fetch(`${API_BASE}/api/auth/activate`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Origin: "https://web.mig66.com",
+          Referer: "https://web.mig66.com/",
+          "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+          Accept: "application/json, text/plain, */*",
+          "Accept-Language": "en-US,en;q=0.9",
+          "sec-fetch-dest": "empty",
+          "sec-fetch-mode": "cors",
+          "sec-fetch-site": "same-site",
+        },
+        body: JSON.stringify({ token: String(activationToken) }),
+      });
+      const text = await resp.text();
+      try { return { status: resp.status, data: JSON.parse(text) }; }
+      catch { return { status: resp.status, data: text }; }
+    } catch (e) { return { status: 500, data: e.message }; }
+  }
 
   // ── Auto-welcome ──────────────────────────────────────────
   handleUserJoined(data) {
@@ -1231,6 +1307,204 @@ async function handleCommand(content, senderName, callerAccount, source, sourceR
     }
     return;
   }
+  // ══════════════════════════════════════════════════════════
+  //  VOTE
+  //  |vote <username> [$acc]       → vote for a user
+  //  |vote <username> $aa          → all sub-accounts vote
+  // ══════════════════════════════════════════════════════════
+
+  const voteMatch = cmd.match(/^\|vote\s+(\w+)/i);
+  if (voteMatch) {
+    const voteTarget = voteMatch[1];
+
+    const voters = isAllAccounts
+      ? getAllSubAccounts()
+      : targetAccounts.length > 0 ? targetAccounts : [target];
+
+    if (voters.length === 0) { reply(`❌ No accounts available`); return; }
+
+    if (voters.length === 1) {
+      const r = await voters[0].voteUser(voteTarget);
+      const ok = r.status < 400;
+      const msg = r.data?.message || r.data?.data?.message || JSON.stringify(r.data).slice(0, 80);
+      reply(`${ok ? "✅" : "❌"} @${voters[0].username} voted for @${voteTarget}: ${msg}`);
+    } else {
+      reply(`⏳ Voting for @${voteTarget} from ${voters.length} accounts...`);
+      let ok = 0, fail = 0;
+      for (const acc of voters) {
+        const r = await acc.voteUser(voteTarget);
+        if (r.status < 400) {
+          ok++;
+          const msg = r.data?.message || r.data?.data?.message || "OK";
+          reply(`  ✅ @${acc.username}: ${msg}`);
+        } else {
+          fail++;
+          const msg = r.data?.message || r.data?.data?.message || r.data?.error || JSON.stringify(r.data).slice(0, 60);
+          reply(`  ❌ @${acc.username}: ${msg}`);
+        }
+        await new Promise((res) => setTimeout(res, 300));
+      }
+      reply(`📊 Vote done: ${ok} success, ${fail} failed`);
+    }
+    return;
+  }
+
+  // ══════════════════════════════════════════════════════════
+  //  EMAIL
+  //  |email @<to> #<subject> *<body> [$acc]
+  //  Example: |email @faysal #Hello *How are you? $firefox
+  //
+  //  |inbox [$acc]         → show inbox (page 1)
+  //  |inbox 2 [$acc]       → show inbox page 2
+  // ══════════════════════════════════════════════════════════
+
+  // Send email: |email @username #subject *body
+  const emailMatch = cmd.match(/^\|email\s+@(\w+)\s+#([^*]+)\s*\*(.+)/i);
+  if (emailMatch) {
+    const [, toUser, subject, body] = emailMatch;
+    const emailBody = body.trim();
+    const emailSubject = subject.trim();
+
+    const senders = isAllAccounts
+      ? getAllSubAccounts()
+      : targetAccounts.length > 0 ? targetAccounts : [target];
+
+    if (senders.length === 1) {
+      const r = await senders[0].sendEmail(toUser, emailSubject, emailBody);
+      const ok = r.status < 400;
+      const msg = r.data?.message || r.data?.data?.message || JSON.stringify(r.data).slice(0, 80);
+      reply(`${ok ? "✅" : "❌"} Email from @${senders[0].username} → @${toUser}: ${msg}`);
+    } else {
+      reply(`⏳ Sending email to @${toUser} from ${senders.length} accounts...`);
+      let ok = 0, fail = 0;
+      for (const acc of senders) {
+        const r = await acc.sendEmail(toUser, emailSubject, emailBody);
+        if (r.status < 400) { ok++; reply(`  ✅ @${acc.username}: sent`); }
+        else {
+          fail++;
+          const msg = r.data?.message || r.data?.data?.message || JSON.stringify(r.data).slice(0, 60);
+          reply(`  ❌ @${acc.username}: ${msg}`);
+        }
+        await new Promise((res) => setTimeout(res, 300));
+      }
+      reply(`📊 Email sent: ${ok} success, ${fail} failed`);
+    }
+    return;
+  }
+
+  // Read inbox: |inbox [page] [$acc]
+  const inboxMatch = cmd.match(/^\|inbox(?:\s+(\d+))?/i);
+  if (inboxMatch) {
+    const page = Number(inboxMatch[1] || 1);
+    const r = await target.getInbox("all", page);
+    const emails = r.data?.emails || r.data?.data?.emails || r.data?.data || r.data || [];
+    const list = Array.isArray(emails) ? emails : [];
+    if (!list.length) { reply(`📭 Inbox empty (page ${page}) for @${target.username}`); return; }
+    const lines = list.slice(0, 10).map((e, i) => {
+      const from = e.from_username || e.sender?.username || e.from || "?";
+      const subj = e.subject || "(no subject)";
+      const date = e.created_at ? new Date(e.created_at).toLocaleDateString() : "";
+      return `  ${i + 1}. From:@${from} | ${subj} ${date ? `| ${date}` : ""}`;
+    }).join("\n");
+    reply(`📬 Inbox @${target.username} (page ${page}):\n${lines}`);
+    return;
+  }
+
+  // ══════════════════════════════════════════════════════════
+  //  REGISTRATION & ACTIVATION
+  //  Register:  |reg <username> <email> <password> [gender] [country]
+  //  Syntax:    |reg myuser myuser@email.com mypass123
+  //             |reg myuser myuser@email.com mypass123 female Bangladesh
+  //
+  //  Activate:  |act <activation_code>
+  //  Syntax:    |act 0ADF82
+  //
+  //  After activation, use |lnu username:password to login the new account
+  //
+  //  Daily XP:  |daily [$acc]     → claim daily login XP bonus
+  //             |daily $aa        → all sub-accounts claim
+  // ══════════════════════════════════════════════════════════
+
+  // Register: |reg <username> <email> <password> [gender] [country]
+  const regMatch = cmd.match(/^\|reg\s+(\S+)\s+(\S+)\s+(\S+)(?:\s+(male|female))?(?:\s+(.+))?/i);
+  if (regMatch) {
+    if (!isFullParent) { reply(`❌ Only full parents can register accounts`); return; }
+    const [, regUser, regEmail, regPass, regGender = "male", regCountry = "Bangladesh"] = regMatch;
+
+    reply(`⏳ Registering @${regUser} (${regEmail})...`);
+    const r = await callerAccount.registerAccount(
+      regUser, regEmail, regPass,
+      regGender.toLowerCase(),
+      regCountry.trim()
+    );
+
+    const ok = r.status < 400;
+    const msg = r.data?.message || r.data?.data?.message || r.data?.error || JSON.stringify(r.data).slice(0, 120);
+
+    if (ok) {
+      reply(
+        `✅ Registered @${regUser}!\n` +
+        `  Email: ${regEmail}\n` +
+        `  Password: ${regPass}\n` +
+        `  ${msg}\n\n` +
+        `📧 Check email for activation code, then use:\n` +
+        `  |act <code>\n` +
+        `Then login with:\n` +
+        `  |lnu ${regUser}:${regPass}`
+      );
+    } else {
+      reply(`❌ Registration failed for @${regUser}: ${msg}`);
+    }
+    return;
+  }
+
+  // Activate account: |act <code>
+  const actMatch = cmd.match(/^\|act\s+(\S+)/i);
+  if (actMatch) {
+    if (!isFullParent) { reply(`❌ Only full parents can activate accounts`); return; }
+    const activationCode = actMatch[1].trim();
+
+    reply(`⏳ Activating with code: ${activationCode}...`);
+    const r = await callerAccount.activateAccount(activationCode);
+
+    const ok = r.status < 400;
+    const msg = r.data?.message || r.data?.data?.message || r.data?.error || JSON.stringify(r.data).slice(0, 120);
+    reply(`${ok ? "✅" : "❌"} Activation [${activationCode}]: ${msg}`);
+    return;
+  }
+
+  // Daily XP claim: |daily [$acc or $aa]
+  if (/^\|daily/i.test(cmd)) {
+    const dailyTargets = isAllAccounts
+      ? getAllSubAccounts()
+      : targetAccounts.length > 0 ? targetAccounts : [target];
+
+    if (dailyTargets.length === 1) {
+      const r = await dailyTargets[0].claimDailyLogin();
+      const ok = r.status < 400;
+      const msg = r.data?.message || r.data?.data?.message || r.data?.xp || JSON.stringify(r.data).slice(0, 80);
+      reply(`${ok ? "✅" : "❌"} Daily XP @${dailyTargets[0].username}: ${msg}`);
+    } else {
+      reply(`⏳ Claiming daily XP for ${dailyTargets.length} accounts...`);
+      let ok = 0, fail = 0;
+      for (const acc of dailyTargets) {
+        const r = await acc.claimDailyLogin();
+        if (r.status < 400) {
+          ok++;
+          const msg = r.data?.message || r.data?.data?.message || "OK";
+          reply(`  ✅ @${acc.username}: ${msg}`);
+        } else {
+          fail++;
+          const msg = r.data?.message || r.data?.data?.message || JSON.stringify(r.data).slice(0, 60);
+          reply(`  ❌ @${acc.username}: ${msg}`);
+        }
+        await new Promise((res) => setTimeout(res, 300));
+      }
+      reply(`📊 Daily XP: ${ok} claimed, ${fail} failed`);
+    }
+    return;
+  }
+
 
   // ══════════════════════════════════════════════════════════
   //  FEATURE TOGGLES
@@ -1415,6 +1689,23 @@ async function handleCommand(content, senderName, callerAccount, source, sourceR
     h += `  |pin $acc             → check if PIN is set\n`
     h += `  |send <to> <amt> <pin> $acc  → transfer coins\n`
     h += `  |send <to> <amt> <pin> tag $acc  → transfer + announce\n\n`;
+    h += `🗳️ Vote:\n`;
+    h += `  |vote <username> [$acc]          → vote for a user\n`;
+    h += `  |vote <username> $aa             → all sub-accs vote\n\n`;
+    h += `📧 Email:\n`;
+    h += `  |email @<to> #<subject> *<body> [$acc]\n`;
+    h += `  Example: |email @faysal #Hi *Hello there $firefox\n`;
+    h += `  |inbox [page] [$acc]             → read inbox\n\n`;
+    h += `📝 Registration (parent only):\n`;
+    h += `  |reg <user> <email> <pass> [gender] [country]\n`;
+    h += `  Example: |reg myuser me@email.com pass123\n`;
+    h += `  Example: |reg myuser me@email.com pass123 female India\n`;
+    h += `  |act <code>                    → activate with email code\n\n`;
+    h += `⚙️ Parent Only:\n`;
+    h += `  |ap <user>  |rp <user>\n`;
+    h += `  |asp <user>  |rsp <user>\n\n`;
+    h += `🎯 Daily XP:\n`;
+    h += `  |daily [$acc or $aa]             → claim daily login bonus\n\n`;    
     h += `🃏 LowCard Bot Auto-Play:\n`
     h += `  |lcb on <room_id> $acc    → start auto-play in room\n`
     h += `  |lcb off <room_id> $acc   → stop for that room\n`
