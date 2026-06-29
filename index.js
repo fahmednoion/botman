@@ -7,102 +7,189 @@ const express = require("express");
 
 const app = express();
 const PORT = process.env.PORT || 3000;
+
 const startTime = Date.now();
 
 app.get("/", (req, res) => {
-  res.json({ status: "online", bot: process.env.MIG66_USERNAME, uptime: process.uptime() });
+  res.json({
+    status: "online",
+    bot: process.env.MIG66_USERNAME,
+    uptime: process.uptime(),
+  });
 });
-app.get("/health", (req, res) => res.status(200).send("OK"));
-app.listen(PORT, "0.0.0.0", () => console.log(`🌐 Web service listening on port ${PORT}`));
+
+app.get("/health", (req, res) => {
+  res.status(200).send("OK");
+});
+
+app.listen(PORT, "0.0.0.0", () => {
+  console.log(`🌐 Web service listening on port ${PORT}`);
+});
 
 // ══════════════════════════════════════════════════════════════
 //  CONFIGURATION
 // ══════════════════════════════════════════════════════════════
-const API_BASE  = process.env.API_BASE || "https://dashboard.mig66.com";
-const USERNAME  = process.env.MIG66_USERNAME;   // Mother account
-const PASSWORD  = process.env.MIG66_PASSWORD;
-let   TOKEN     = process.env.MIG66_TOKEN;
-const ROOM_ID   = parseInt(process.env.MIG66_ROOM_ID || "50");
-const TRIGGER   = (process.env.TRIGGER_KEYWORD || `@${USERNAME}`).toLowerCase();
+const API_BASE = process.env.API_BASE || "https://dashboard.mig66.com";
+const USERNAME = process.env.MIG66_USERNAME;           // Mother account username
+const PASSWORD = process.env.MIG66_PASSWORD;
+let TOKEN = process.env.MIG66_TOKEN;
+const ROOM_ID = parseInt(process.env.MIG66_ROOM_ID || "50");
+const TRIGGER = (process.env.TRIGGER_KEYWORD || `@${USERNAME}`).toLowerCase();
 const AW_MESSAGE = process.env.AW_MESSAGE || "Wc {username} 🎉 Welcome!";
 const AI_PROVIDER = process.env.AI_PROVIDER || "mistral";
-const DEBUG     = process.env.DEBUG === "true";
+const DEBUG = process.env.DEBUG === "true";
 
-// ── Parent / Sub-parent sets ──────────────────────────────────
+// ── Parent / Sub-parent management ───────────────────────────
 const PARENT_USERS = new Set(
   (process.env.PARENT_USERNAMES || process.env.PARENT_USERNAME || "faysal")
-    .split(",").map(u => u.trim().toLowerCase()).filter(Boolean)
+    .split(",")
+    .map((u) => u.trim().toLowerCase())
+    .filter(Boolean)
 );
+
 const SUB_PARENT_USERS = new Set(
   (process.env.SUB_PARENT_USERNAMES || "")
-    .split(",").map(u => u.trim().toLowerCase()).filter(Boolean)
+    .split(",")
+    .map((u) => u.trim().toLowerCase())
+    .filter(Boolean)
 );
 
-function isMother(u)    { return (u||"").toLowerCase() === (USERNAME||"").toLowerCase(); }
-function isParent(u)    { return PARENT_USERS.has((u||"").toLowerCase()); }
-function isSubParent(u) { return SUB_PARENT_USERS.has((u||"").toLowerCase()); }
-function isAuthorized(u){ return isParent(u) || isSubParent(u); }
+function isParent(username) {
+  // Mother account is always treated as a full parent
+  if (isMother(username)) return true;
+  return PARENT_USERS.has((username || "").toLowerCase());
+}
+function isSubParent(username) {
+  return SUB_PARENT_USERS.has((username || "").toLowerCase());
+}
+function isAuthorized(username) {
+  return isParent(username) || isSubParent(username);
+}
+function isMother(username) {
+  return (username || "").toLowerCase() === (USERNAME || "").toLowerCase();
+}
 
-// ── Room list ─────────────────────────────────────────────────
+// ── Room List ─────────────────────────────────────────────────
 const ROOM_LIST = new Map([
-  ["Dhaka",50],["Bangladesh",1],["India",2],["Nepal",3],
-  ["Philippine",4],["Indonesia",5],["Savages",46],["Bangladeshi",20],
-  ["Kolkata",238],["Faysal",228],["Buy Sell",288],
-  ["Coin Bazar",305],["Coins Sell group",306],
+  ["Dhaka", 50],
+  ["Bangladesh", 1],
+  ["India", 2],
+  ["Nepal", 3],
+  ["Philippine", 4],
+  ["Indonesia", 5],
+  ["Savages", 46],
+  ["Bangladeshi", 20],
+  ["Kolkata", 238],
+  ["Faysal", 228],
+  ["Buy Sell", 288],
+  ["Coin Bazar", 305],
+  ["Coins Sell group", 306],
 ]);
-const addRoom    = (n,id) => ROOM_LIST.set(n.trim(), Number(id));
-const removeRoom = (n)    => ROOM_LIST.delete(n.trim());
-const listRooms  = ()     => [...ROOM_LIST.entries()].map(([n,id])=>`${n}=${id}`).join(", ");
+
+function addRoom(name, roomId) {
+  ROOM_LIST.set(name.trim(), Number(roomId));
+}
+function removeRoom(name) {
+  ROOM_LIST.delete(name.trim());
+}
+function listRooms() {
+  return [...ROOM_LIST.entries()].map(([name, id]) => `${name}=${id}`).join(", ");
+}
 
 // ══════════════════════════════════════════════════════════════
-//  UTILITIES
+//  UTILITY FUNCTIONS
 // ══════════════════════════════════════════════════════════════
-function formatUptime(sec) {
-  return `${Math.floor(sec/3600)}h ${Math.floor((sec%3600)/60)}m ${Math.floor(sec%60)}s`;
+function formatUptime(seconds) {
+  const h = Math.floor(seconds / 3600);
+  const m = Math.floor((seconds % 3600) / 60);
+  const s = Math.floor(seconds % 60);
+  return `${h}h ${m}m ${s}s`;
 }
 
-function saveTokenToEnv(tok) {
+function saveTokenToEnv(newToken) {
   try {
-    const p = path.join(__dirname, ".env");
-    let c = fs.existsSync(p) ? fs.readFileSync(p,"utf8") : "";
-    c = c.includes("MIG66_TOKEN=")
-      ? c.replace(/MIG66_TOKEN=.*/g, `MIG66_TOKEN=${tok}`)
-      : c + `\nMIG66_TOKEN=${tok}`;
-    fs.writeFileSync(p, c, "utf8");
-    console.log(`[.env] ✅ Token saved`);
-  } catch(e) { console.error(`[.env] ❌ ${e.message}`); }
+    const envPath = path.join(__dirname, ".env");
+    let content = fs.existsSync(envPath) ? fs.readFileSync(envPath, "utf8") : "";
+    if (content.includes("MIG66_TOKEN=")) {
+      content = content.replace(/MIG66_TOKEN=.*/g, `MIG66_TOKEN=${newToken}`);
+    } else {
+      content += `\nMIG66_TOKEN=${newToken}`;
+    }
+    fs.writeFileSync(envPath, content, "utf8");
+    console.log(`[.env] ✅ Token saved (${newToken.slice(0, 20)}...)`);
+  } catch (e) {
+    console.error(`[.env] ❌ Could not save token: ${e.message}`);
+  }
 }
 
-function loadLines(file) {
+function loadAutoTexts() {
+  const messages = [];
   try {
-    const p = path.join(__dirname, file);
-    if (!fs.existsSync(p)) return [];
-    return fs.readFileSync(p,"utf8").split("\n")
-      .map(l=>l.trim()).filter(l=>l && !l.startsWith("#"));
-  } catch(e) { console.error(`[${file}] load error: ${e.message}`); return []; }
+    const filePath = path.join(__dirname, "at.txt");
+    if (fs.existsSync(filePath)) {
+      const lines = fs.readFileSync(filePath, "utf8").split("\n");
+      for (const line of lines) {
+        const trimmed = line.trim();
+        if (trimmed && !trimmed.startsWith("#")) messages.push(trimmed);
+      }
+    }
+    console.log(`[AutoText] Loaded ${messages.length} messages from at.txt`);
+  } catch (e) {
+    console.error(`[AutoText] Error loading at.txt: ${e.message}`);
+  }
+  return messages;
 }
 
-// ── AI (Mistral) ──────────────────────────────────────────────
+function loadFloodTexts() {
+  const messages = [];
+  try {
+    const filePath = path.join(__dirname, "flood.txt");
+    if (fs.existsSync(filePath)) {
+      const lines = fs.readFileSync(filePath, "utf8").split("\n");
+      for (const line of lines) {
+        const trimmed = line.trim();
+        if (trimmed && !trimmed.startsWith("#")) messages.push(trimmed);
+      }
+    }
+    console.log(`[Flood] Loaded ${messages.length} messages from flood.txt`);
+  } catch (e) {
+    console.error(`[Flood] Error loading flood.txt: ${e.message}`);
+  }
+  return messages;
+}
+
+// ── AI Reply (Mistral) ────────────────────────────────────────
 async function getAIReply(question) {
-  const KEY = process.env.MISTRAL_API_KEY;
-  const URL = process.env.MISTRAL_API_URL || "https://api.mistral.ai/v1/chat/completions";
-  if (!KEY) return "AI not configured. Set MISTRAL_API_KEY in .env";
+  const API_KEY = process.env.MISTRAL_API_KEY;
+  const API_URL = process.env.MISTRAL_API_URL || "https://api.mistral.ai/v1/chat/completions";
+
+  if (!API_KEY) return "AI is not configured. Please set MISTRAL_API_KEY in .env";
+
   try {
-    const res = await fetch(URL, {
+    const response = await fetch(API_URL, {
       method: "POST",
-      headers: { "Content-Type":"application/json", Authorization:`Bearer ${KEY}` },
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${API_KEY}`,
+      },
       body: JSON.stringify({
         model: "mistral-tiny",
-        messages: [{ role:"user", content:question }],
-        max_tokens: 150, temperature: 0.7,
+        messages: [{ role: "user", content: question }],
+        max_tokens: 150,
+        temperature: 0.7,
       }),
     });
-    if (!res.ok) throw new Error(`HTTP ${res.status}`);
-    const d = await res.json();
-    return d.choices?.[0]?.message?.content || "No response.";
-  } catch(e) {
-    console.error("[AI]", e.message);
-    return "Sorry, AI unavailable right now.";
+
+    if (!response.ok) {
+      const errorData = await response.json();
+      throw new Error(`Mistral API error: ${response.status} - ${JSON.stringify(errorData)}`);
+    }
+
+    const data = await response.json();
+    return data.choices?.[0]?.message?.content || "Sorry, I couldn't generate a response.";
+  } catch (error) {
+    console.error("[Mistral AI Error]:", error.message);
+    return "Sorry, I couldn't connect to the AI service.";
   }
 }
 
@@ -110,118 +197,115 @@ async function getAIReply(question) {
 //  BOT ACCOUNT CLASS
 // ══════════════════════════════════════════════════════════════
 class BotAccount {
-  constructor({ username, password, token, isMain=false }) {
+  constructor({ username, password, token, isMain = false }) {
     this.username = username;
     this.password = password;
-    this.token    = token || null;
-    this.isMain   = isMain;
-    this.userId   = null;
-    this.socket   = null;
+    this.token = token || null;
+    this.isMain = isMain;
+    this.userId = null;
+    this.socket = null;
     this.joinedRooms = new Set();
 
-    // Toggles
-    this.voucherOn   = true;
-    this.awOn        = false;
+    // Feature toggles
+    this.voucherOn = true;
+    this.awOn = false;
     this.autoReplyOn = false;
-    this.awTemplate  = AW_MESSAGE;
-    this.awRooms     = new Set();
-    this.awMessages  = new Map();
+    this.awTemplate = AW_MESSAGE;
+    this.awRooms = new Set();
+    this.awMessages = new Map();
 
-    // Auto-text
-    this.autoTextOn       = false;
-    this.autoTextRooms    = new Set();
+    // Auto-text system
+    this.autoTextOn = false;
+    this.autoTextRooms = new Set();
     this.autoTextMessages = [];
-    this.autoTextIndex    = new Map();
+    this.autoTextIndex = new Map();
     this.autoTextInterval = 5;
-    this.autoTextTimer    = null;
+    this.autoTextTimer = null;
 
-    // Flood
-    this.floodActive      = false;
-    this.floodRoomId      = null;
-    this.floodMessages    = [];
-    this.floodIndex       = 0;
-    this.floodInterval    = null;
-    this.floodMode        = "custom";
-    this.floodCustomText  = "";
-    this.floodMessageCount= 0;
+    // Flood system
+    this.floodActive = false;
+    this.floodRoomId = null;
+    this.floodMessages = [];
+    this.floodIndex = 0;
+    this.floodInterval = null;
+    this.floodMode = "custom";
+    this.floodCustomText = "";
+    this.floodMessageCount = 0;
 
-    this.balance     = null;
+    this.balance = null;
     this.isConnected = false;
     this.reconnTimer = null;
-    this.processed   = new Set();
-    this.startTime   = Date.now();
+    this.processed = new Set();
+    this.startTime = Date.now();
   }
 
-  log(msg) { console.log(`[${this.username}] ${msg}`); }
+  log(msg) {
+    console.log(`[${this.username}] ${msg}`);
+  }
 
   // ── Login ─────────────────────────────────────────────────
   async login() {
-    // Try existing token first
     if (this.token && !this.isTokenExpired()) {
       try {
         const p = JSON.parse(Buffer.from(this.token.split(".")[1], "base64").toString());
         this.userId = String(p.id || "");
-        this.log(`✓ Token OK — user:${p.username} id:${this.userId} exp:${new Date(p.exp*1000).toLocaleString()}`);
+        const exp = new Date(p.exp * 1000).toLocaleString();
+        this.log(`✓ Token valid — user: ${p.username}, ID: ${this.userId}, expires: ${exp}`);
         return true;
-      } catch(e) { this.log(`! Token decode: ${e.message}`); }
+      } catch (e) {
+        this.log(`! Token decode error: ${e.message}`);
+      }
     }
 
     if (!this.password) {
-      this.log("❌ No password and no valid token");
+      this.log("❌ No password set and token is missing/expired. Add MIG66_PASSWORD to .env");
       return false;
     }
 
-    this.log(`Logging in as ${this.username}...`);
+    this.log("Logging in with password...");
     try {
       const resp = await fetch(`${API_BASE}/api/auth/login`, {
         method: "POST",
         headers: {
-          "Content-Type":    "application/json",
-          "Origin":          "https://web.mig66.com",
-          "Referer":         "https://web.mig66.com/",
-          "User-Agent":      "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
-          "Accept":          "application/json, text/plain, */*",
+          "Content-Type": "application/json",
+          Origin: "https://web.mig66.com",
+          Referer: "https://web.mig66.com/",
+          "User-Agent":
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+          Accept: "application/json, text/plain, */*",
           "Accept-Language": "en-US,en;q=0.9",
-          "sec-fetch-dest":  "empty",
-          "sec-fetch-mode":  "cors",
-          "sec-fetch-site":  "same-site",
+          "sec-fetch-dest": "empty",
+          "sec-fetch-mode": "cors",
+          "sec-fetch-site": "same-site",
         },
         body: JSON.stringify({
-          username:     this.username,
-          password:     this.password,
-          remember_me:  true,
-          login_offline:false,
-          device_info:  "Flutter Web",
+          username: this.username,
+          password: this.password,
+          remember_me: true,
+          login_offline: false,
+          device_info: "Flutter Web",
         }),
       });
 
-      // Read raw text first so we can log it on failure
-      const raw = await resp.text();
-      let data;
-      try { data = JSON.parse(raw); }
-      catch { data = {}; }
+      const data = await resp.json();
+      this.token = data?.token || data?.data?.token;
 
-      // Token can live at multiple paths depending on API version
-      const tok = data?.token
-               || data?.data?.token
-               || data?.access_token
-               || data?.data?.access_token
-               || null;
-
-      if (!tok) {
-        this.log(`❌ Login failed (HTTP ${resp.status}) — ${raw.slice(0,200)}`);
+      if (!this.token) {
+        this.log(`❌ Login failed (${resp.status}): ${JSON.stringify(data).slice(0, 200)}`);
         return false;
       }
 
-      this.token = tok;
-      const p = JSON.parse(Buffer.from(tok.split(".")[1], "base64").toString());
+      const p = JSON.parse(Buffer.from(this.token.split(".")[1], "base64").toString());
       this.userId = String(p.id || "");
-      this.log(`✓ Logged in — id:${this.userId}`);
+      this.log(`✓ Logged in — ID: ${this.userId}`);
 
-      if (this.isMain) { saveTokenToEnv(tok); TOKEN = tok; }
+      if (this.isMain) {
+        saveTokenToEnv(this.token);
+        TOKEN = this.token;
+      }
+
       return true;
-
-    } catch(e) {
+    } catch (e) {
       this.log(`❌ Login error: ${e.message}`);
       return false;
     }
@@ -231,46 +315,57 @@ class BotAccount {
     if (!this.token) return true;
     try {
       const p = JSON.parse(Buffer.from(this.token.split(".")[1], "base64").toString());
-      return Date.now() > p.exp * 1000 - 3_600_000;
-    } catch { return false; }
+      return Date.now() > p.exp * 1000 - 3600000;
+    } catch {
+      return false;
+    }
   }
 
-  // ── HTTP helper ───────────────────────────────────────────
   async api(method, apiPath, body) {
     const opts = {
       method,
-      headers: { "Content-Type":"application/json", Authorization:`Bearer ${this.token}` },
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${this.token}`,
+      },
     };
     if (body) opts.body = JSON.stringify(body);
     try {
-      const r = await fetch(`${API_BASE}${apiPath}`, opts);
-      const t = await r.text();
-      try { return { status:r.status, data:JSON.parse(t) }; }
-      catch { return { status:r.status, data:t }; }
-    } catch(e) { return { status:500, data:e.message }; }
+      const resp = await fetch(`${API_BASE}${apiPath}`, opts);
+      const text = await resp.text();
+      try {
+        return { status: resp.status, data: JSON.parse(text) };
+      } catch {
+        return { status: resp.status, data: text };
+      }
+    } catch (e) {
+      return { status: 500, data: e.message };
+    }
   }
 
   // ── Messaging ─────────────────────────────────────────────
   sendRoom(roomId, text) {
     if (!this.socket?.connected) return;
     this.socket.emit("send_message", {
-      room_id: Number(roomId), content: text, msg_type: "text",
-      client_msg_id: `bot_${Date.now()}_${Math.random().toString(36).slice(2,6)}`,
+      room_id: Number(roomId),
+      content: text,
+      msg_type: "text",
+      client_msg_id: `bot_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
     });
-    this.log(`→ Room ${roomId}: "${text.slice(0,80)}"`);
+    this.log(`→ Room ${roomId}: "${text.slice(0, 80)}"`);
   }
 
-  sendPrivate(toUser, text) {
+  sendPrivate(toUsername, text) {
     if (!this.socket?.connected) return;
-    this.socket.emit("private_message", { to_username:toUser, content:text });
-    this.log(`→ PM @${toUser}: "${text.slice(0,80)}"`);
+    this.socket.emit("private_message", { to_username: toUsername, content: text });
+    this.log(`→ PM @${toUsername}: "${text.slice(0, 80)}"`);
   }
 
   // ── Room control ──────────────────────────────────────────
   joinRoom(roomId) {
     roomId = Number(roomId);
     if (this.socket?.connected) {
-      this.socket.emit("join_room", { room_id:roomId, is_manual:true });
+      this.socket.emit("join_room", { room_id: roomId, is_manual: true });
       this.joinedRooms.add(roomId);
       this.log(`+ Joining room ${roomId}`);
     }
@@ -279,655 +374,1175 @@ class BotAccount {
   leaveRoom(roomId) {
     roomId = Number(roomId);
     if (this.socket?.connected) {
-      this.socket.emit("leave_room", { room_id:roomId });
+      this.socket.emit("leave_room", { room_id: roomId });
       this.joinedRooms.delete(roomId);
       this.log(`- Left room ${roomId}`);
     }
   }
 
   leaveAll() {
-    for (const r of this.joinedRooms)
-      if (this.socket?.connected) this.socket.emit("leave_room", { room_id:r });
-    const n = this.joinedRooms.size;
-    this.joinedRooms.clear();
-    return n;
-  }
-
-  // ── Friends ───────────────────────────────────────────────
-  async sendFriendRequest(u)  { return this.api("POST","/api/friends/request",{username:u}); }
-
-  async acceptFriendRequest(id) {
-    return this.api("POST","/api/friends/accept",{ request_id: Number(id) });
-  }
-
-  // Accept ALL pending friend requests at once
-  async acceptAllFriendRequests() {
-    const r = await this.getFriendRequests();
-    const reqs = Array.isArray(r.data) ? r.data : (r.data?.requests || r.data?.data || []);
-    if (!reqs.length) return { accepted:0, failed:0, list:[] };
-    let accepted=0, failed=0, list=[];
-    for (const req of reqs) {
-      const reqId = req.id || req.request_id;
-      if (!reqId) continue;
-      const res = await this.acceptFriendRequest(reqId);
-      const name = req.username || req.sender?.username || `#${reqId}`;
-      if (res.status < 400) { accepted++; list.push(`✅ @${name}`); }
-      else                  { failed++;   list.push(`❌ @${name} (${res.status})`); }
-      await new Promise(r=>setTimeout(r,300)); // small delay between accepts
+    for (const r of this.joinedRooms) {
+      if (this.socket?.connected) this.socket.emit("leave_room", { room_id: r });
     }
-    return { accepted, failed, list };
+    const count = this.joinedRooms.size;
+    this.joinedRooms.clear();
+    return count;
   }
 
-  async getFriendRequests()    { return this.api("GET","/api/friends/requests"); }
-  async getFriends()           { return this.api("GET","/api/friends"); }
+  // ── Friend actions ────────────────────────────────────────
+  async sendFriendRequest(username) {
+    const r = await this.api("POST", "/api/friends/request", { username });
+    this.log(`Friend request → @${username}: ${r.status}`);
+    return r;
+  }
 
-  // Check if PIN is set on this account
-  async getPinStatus() { return this.api("GET","/api/account/pin/status"); }
+  async acceptFriendRequest(requestId) {
+    const r = await this.api("POST", "/api/friends/accept", { request_id: Number(requestId) });
+    this.log(`Accept friend #${requestId}: ${r.status}`);
+    return r;
+  }
 
-  // Get full account info including balance
-  async getAccount()   { return this.api("GET","/api/account"); }
+  async getFriendRequests() {
+    return await this.api("GET", "/api/friends/requests");
+  }
 
-  // Transfer coins to another user
-  // pin: account PIN (set in mig66 app)
-  // sendTag: whether to announce transfer in room (false = silent)
-  async transferCoins(toUsername, amount, pin, sendTag=false) {
-    if (!pin) return { status:400, data:"PIN required" };
-    return this.api("POST","/api/account/transfer",{
+  async getFriendsList() {
+    return await this.api("GET", "/api/friends");
+  }
+
+  async getAccount() {
+    return await this.api("GET", "/api/account");
+  }
+
+  async getPinStatus() {
+    return await this.api("GET", "/api/account/pin/status");
+  }
+
+  async transferCoins(toUsername, amount, pin, sendTag = false) {
+    const r = await this.api("POST", "/api/account/transfer", {
       to_username: toUsername,
-      amount:      Number(amount),
-      pin:         String(pin),
-      send_tag:    Boolean(sendTag),
+      amount: Number(amount),
+      pin: String(pin),
+      send_tag: sendTag,
     });
+    this.log(`💸 Transfer ${amount} coins → @${toUsername}: ${r.status}`);
+    return r;
   }
 
-  // ── Voucher ───────────────────────────────────────────────
+  // ── Vote ──────────────────────────────────────────────────
+  async voteUser(username) {
+    const r = await this.api("POST", `/api/profile/${encodeURIComponent(username)}/vote`, {});
+    this.log(`🗳️ Vote → @${username}: ${r.status}`);
+    return r;
+  }
+
+  // ── Email ─────────────────────────────────────────────────
+  async sendEmail(toUsername, subject, body) {
+    const r = await this.api("POST", "/api/emails/send", {
+      to_username: toUsername,
+      subject,
+      body,
+    });
+    this.log(`📧 Email → @${toUsername} [${subject}]: ${r.status}`);
+    return r;
+  }
+
+  async getInbox(filter = "all", page = 1) {
+    return await this.api("GET", `/api/emails/inbox?filter=${filter}&page=${page}`);
+  }
+
+  // ── Daily XP login bonus ──────────────────────────────────
+  async claimDailyLogin() {
+    const r = await this.api("POST", "/api/xp/daily-login", {});
+    this.log(`🎯 Daily login XP claim: ${r.status}`);
+    return r;
+  }
+
+  // ── Register new account (no auth needed) ────────────────
+  async registerAccount(username, email, password, gender = "male", country = "Bangladesh") {
+    try {
+      const resp = await fetch(`${API_BASE}/api/auth/register`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Origin: "https://web.mig66.com",
+          Referer: "https://web.mig66.com/",
+          "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+          Accept: "application/json, text/plain, */*",
+          "Accept-Language": "en-US,en;q=0.9",
+          "sec-fetch-dest": "empty",
+          "sec-fetch-mode": "cors",
+          "sec-fetch-site": "same-site",
+        },
+        body: JSON.stringify({ username, email, password, confirm_password: password, gender, country }),
+      });
+      const text = await resp.text();
+      try { return { status: resp.status, data: JSON.parse(text) }; }
+      catch { return { status: resp.status, data: text }; }
+    } catch (e) { return { status: 500, data: e.message }; }
+  }
+
+  // ── Activate account (no auth needed) ────────────────────
+  async activateAccount(activationToken) {
+    try {
+      const resp = await fetch(`${API_BASE}/api/auth/activate`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Origin: "https://web.mig66.com",
+          Referer: "https://web.mig66.com/",
+          "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+          Accept: "application/json, text/plain, */*",
+          "Accept-Language": "en-US,en;q=0.9",
+          "sec-fetch-dest": "empty",
+          "sec-fetch-mode": "cors",
+          "sec-fetch-site": "same-site",
+        },
+        body: JSON.stringify({ token: String(activationToken) }),
+      });
+      const text = await resp.text();
+      try { return { status: resp.status, data: JSON.parse(text) }; }
+      catch { return { status: resp.status, data: text }; }
+    } catch (e) { return { status: 500, data: e.message }; }
+  }
+
+
+  // ── Voucher auto-pick ─────────────────────────────────────
   tryPickVoucher(content, roomId) {
     if (!this.voucherOn) return false;
     if (!content.toLowerCase().includes("pick") || !content.toLowerCase().includes("code")) return false;
-    const m = content.match(/\[code\]\s+(\d{4,10})/i);
-    if (m) { this.log(`🎁 Voucher ${m[1]}`); this.sendRoom(roomId, `/pick ${m[1]}`); return true; }
+    const match = content.match(/\[code\]\s+(\d{4,10})/i);
+    if (match) {
+      const code = match[1];
+      this.log(`🎁 VOUCHER in room ${roomId}! Code: ${code}`);
+      this.sendRoom(roomId, `/pick ${code}`);
+      return true;
+    }
     return false;
   }
 
   // ── Auto-welcome ──────────────────────────────────────────
   handleUserJoined(data) {
     if (!this.awOn) return;
-    const rid = Number(data.room_id);
-    if (!this.joinedRooms.has(rid)) return;
-    if (this.awRooms.size > 0 && !this.awRooms.has(rid)) return;
-    if ((data.username||"").toLowerCase() === this.username.toLowerCase()) return;
-    const msg = (this.awMessages.get(rid) || this.awTemplate).replace("{username}", data.username);
-    setTimeout(() => this.sendRoom(rid, msg), 800);
+    const roomId = Number(data.room_id);
+    if (!this.joinedRooms.has(roomId)) return;
+    if (this.awRooms.size > 0 && !this.awRooms.has(roomId)) return;
+    if ((data.username || "").toLowerCase() === this.username.toLowerCase()) return;
+
+    const welcomeMsg = (this.awMessages.get(roomId) || this.awTemplate).replace("{username}", data.username);
+    this.log(`👋 Welcoming @${data.username} in room ${roomId}`);
+    setTimeout(() => this.sendRoom(roomId, welcomeMsg), 800);
   }
 
-  // ── Auto-text ─────────────────────────────────────────────
+  // ── Auto-Text System ──────────────────────────────────────
   startAutoText() {
-    if (!this.autoTextOn || !this.autoTextMessages.length || !this.autoTextRooms.size) return;
-    const tick = () => {
+    if (!this.autoTextOn || this.autoTextMessages.length === 0 || this.autoTextRooms.size === 0) return;
+
+    const sendNextMessage = () => {
       if (!this.autoTextOn) return;
-      for (const rid of this.autoTextRooms) {
-        if (!this.joinedRooms.has(rid)) continue;
-        let i = this.autoTextIndex.get(rid) || 0;
-        if (i >= this.autoTextMessages.length) { i = 0; }
-        this.sendRoom(rid, this.autoTextMessages[i]);
-        this.log(`📝 AutoText [${i+1}/${this.autoTextMessages.length}] → Room ${rid}`);
-        this.autoTextIndex.set(rid, i+1);
+      for (const roomId of this.autoTextRooms) {
+        if (!this.joinedRooms.has(roomId)) continue;
+        if (!this.autoTextIndex.has(roomId)) this.autoTextIndex.set(roomId, 0);
+        let index = this.autoTextIndex.get(roomId);
+        if (index >= this.autoTextMessages.length) { index = 0; this.autoTextIndex.set(roomId, 0); }
+        const message = this.autoTextMessages[index];
+        this.sendRoom(roomId, message);
+        this.log(`📝 AutoText [${index + 1}/${this.autoTextMessages.length}] → Room ${roomId}`);
+        this.autoTextIndex.set(roomId, index + 1);
       }
-      this.autoTextTimer = setTimeout(tick, this.autoTextInterval * 60_000);
+      this.autoTextTimer = setTimeout(sendNextMessage, this.autoTextInterval * 60 * 1000);
     };
-    tick();
+
+    sendNextMessage();
   }
 
   stopAutoText() {
     if (this.autoTextTimer) { clearTimeout(this.autoTextTimer); this.autoTextTimer = null; }
   }
 
-  setAutoTextInterval(min) {
-    this.autoTextInterval = min;
-    if (this.autoTextOn) { this.stopAutoText(); this.startAutoText(); }
+  setAutoTextInterval(minutes) {
+    this.autoTextInterval = minutes;
+    if (this.autoTextOn && this.autoTextTimer) { this.stopAutoText(); this.startAutoText(); }
   }
 
-  // ── Flood ─────────────────────────────────────────────────
-  startCustomFlood(roomId, text) {
+  // ── Flood System ──────────────────────────────────────────
+  startCustomFlood(roomId, customText) {
     this.stopFlood();
-    this.floodActive = true; this.floodRoomId = Number(roomId);
-    this.floodMode = "custom"; this.floodCustomText = text; this.floodMessageCount = 0;
-    this.log(`🌊 CUSTOM FLOOD room ${roomId} | "${text}"`);
-    const tick = () => {
+    this.floodActive = true;
+    this.floodRoomId = Number(roomId);
+    this.floodMode = "custom";
+    this.floodCustomText = customText;
+    this.floodMessageCount = 0;
+    this.log(`🌊 CUSTOM FLOOD STARTED in room ${roomId} | text: "${customText}"`);
+
+    const sendFloodMessage = () => {
       if (!this.floodActive || !this.socket?.connected) { this.stopFlood(); return; }
       this.sendRoom(this.floodRoomId, this.floodCustomText);
       this.floodMessageCount++;
-      this.floodInterval = setTimeout(tick, 100);
+      this.floodInterval = setTimeout(sendFloodMessage, 100);
     };
-    tick(); return true;
+    sendFloodMessage();
+    return true;
   }
 
   startAutoFlood(roomId) {
     this.stopFlood();
-    this.floodMessages = loadLines("flood.txt");
-    if (!this.floodMessages.length) { this.log("❌ flood.txt empty"); return false; }
-    this.floodActive = true; this.floodRoomId = Number(roomId);
-    this.floodMode = "auto"; this.floodIndex = 0; this.floodMessageCount = 0;
-    this.log(`🌊 AUTO FLOOD room ${roomId} | ${this.floodMessages.length} msgs`);
-    const tick = () => {
+    this.floodMessages = loadFloodTexts();
+    if (this.floodMessages.length === 0) { this.log("❌ No messages in flood.txt"); return false; }
+
+    this.floodActive = true;
+    this.floodRoomId = Number(roomId);
+    this.floodMode = "auto";
+    this.floodIndex = 0;
+    this.floodMessageCount = 0;
+    this.log(`🌊 AUTO FLOOD STARTED in room ${roomId} — ${this.floodMessages.length} messages`);
+
+    const sendFloodMessage = () => {
       if (!this.floodActive || !this.socket?.connected) { this.stopFlood(); return; }
       if (this.floodIndex >= this.floodMessages.length) this.floodIndex = 0;
-      this.sendRoom(this.floodRoomId, this.floodMessages[this.floodIndex++]);
+      this.sendRoom(this.floodRoomId, this.floodMessages[this.floodIndex]);
+      this.floodIndex++;
       this.floodMessageCount++;
-      this.floodInterval = setTimeout(tick, 100);
+      this.floodInterval = setTimeout(sendFloodMessage, 100);
     };
-    tick(); return true;
+    sendFloodMessage();
+    return true;
   }
 
   stopFlood() {
     if (this.floodInterval) { clearTimeout(this.floodInterval); this.floodInterval = null; }
-    if (this.floodActive)
-      this.log(`🛑 FLOOD STOPPED room ${this.floodRoomId} (${this.floodMessageCount} sent)`);
-    this.floodActive=false; this.floodRoomId=null; this.floodMessages=[];
-    this.floodIndex=0; this.floodMode="custom"; this.floodCustomText=""; this.floodMessageCount=0;
+    if (this.floodActive) {
+      this.log(`🛑 FLOOD STOPPED in room ${this.floodRoomId} (${this.floodMessageCount} msgs sent)`);
+    }
+    this.floodActive = false;
+    this.floodRoomId = null;
+    this.floodMessages = [];
+    this.floodIndex = 0;
+    this.floodMode = "custom";
+    this.floodCustomText = "";
+    this.floodMessageCount = 0;
   }
 
-  floodStatus() {
+  getFloodStatus() {
     if (!this.floodActive) return "🔴 OFF";
-    return this.floodMode==="custom"
-      ? `🌊 CUSTOM (room:${this.floodRoomId} sent:${this.floodMessageCount} "${this.floodCustomText.slice(0,30)}")`
-      : `🌊 AUTO (room:${this.floodRoomId} sent:${this.floodMessageCount} ${this.floodIndex}/${this.floodMessages.length})`;
+    if (this.floodMode === "custom") {
+      return `🌊 CUSTOM (room: ${this.floodRoomId}, sent: ${this.floodMessageCount}, text: "${this.floodCustomText.slice(0, 30)}...")`;
+    }
+    return `🌊 AUTO (room: ${this.floodRoomId}, sent: ${this.floodMessageCount}, msg: ${this.floodIndex}/${this.floodMessages.length})`;
   }
 
-  // ── Status ────────────────────────────────────────────────
+  // ── Status text ───────────────────────────────────────────
   statusText() {
-    const rooms  = this.joinedRooms.size ? [...this.joinedRooms].join(", ") : "none";
-    const awR    = this.awRooms.size ? [...this.awRooms].join(", ") : "all";
-    const bal    = this.balance !== null ? `${this.balance} cents` : "unknown";
-    const up     = formatUptime((Date.now()-this.startTime)/1000);
+    const rooms = this.joinedRooms.size > 0 ? [...this.joinedRooms].join(", ") : "none";
+    const awRoomsStr = this.awRooms.size > 0 ? [...this.awRooms].join(", ") : "all";
+    const bal = this.balance !== null ? `${this.balance} cents` : "unknown";
+    const uptime = formatUptime((Date.now() - this.startTime) / 1000);
     const motherTag = isMother(this.username) ? " 👑MOTHER" : "";
+
     let atStatus = "🔴 OFF";
     if (this.autoTextOn) {
-      const prog = [...this.autoTextRooms].map(r=>`R${r}:${this.autoTextIndex.get(r)||0}/${this.autoTextMessages.length}`).join(", ");
-      atStatus = `🟢 ON (rooms:${[...this.autoTextRooms].join(",")} ${prog} int:${this.autoTextInterval}m)`;
+      const atRoomsStr = [...this.autoTextRooms].join(", ");
+      const atProgress = [...this.autoTextRooms]
+        .map((rid) => { const cur = this.autoTextIndex.get(rid) || 0; return `R${rid}:${cur}/${this.autoTextMessages.length}`; })
+        .join(", ");
+      atStatus = `🟢 ON (rooms: ${atRoomsStr}, ${atProgress}, interval: ${this.autoTextInterval}m)`;
     }
+
     return (
-      `👤 @${this.username}${motherTag}\n`+
-      `  Connection  : ${this.isConnected?"🟢 Online":"🔴 Offline"}\n`+
-      `  Active rooms: [${rooms}]\n`+
-      `  Voucher pick: ${this.voucherOn?"🟢 ON":"🔴 OFF"}\n`+
-      `  Auto-welcome: ${this.awOn?`🟢 ON (rooms:${awR})`:"🔴 OFF"}\n`+
-      `  Auto-reply  : ${this.autoReplyOn?"🟢 ON":"🔴 OFF"}\n`+
-      `  Auto-text   : ${atStatus}\n`+
-      `  Flood       : ${this.floodStatus()}\n`+
-      `  Balance     : ${bal}\n`+
-      `  Uptime      : ${up}`
+      `👤 @${this.username}${motherTag}\n` +
+      `  Connection  : ${this.isConnected ? "🟢 Online" : "🔴 Offline"}\n` +
+      `  Active rooms: [${rooms}]\n` +
+      `  Voucher pick: ${this.voucherOn ? "🟢 ON" : "🔴 OFF"}\n` +
+      `  Auto-welcome: ${this.awOn ? `🟢 ON (rooms: ${awRoomsStr})` : "🔴 OFF"}\n` +
+      `  Auto-reply  : ${this.autoReplyOn ? "🟢 ON" : "🔴 OFF"}\n` +
+      `  Auto-text   : ${atStatus}\n` +
+      `  Flood       : ${this.getFloodStatus()}\n` +
+      `  Balance     : ${bal}\n` +
+      `  Uptime      : ${uptime}`
     );
   }
 
   // ── Handle private message ────────────────────────────────
   async handlePrivate(data) {
-    const senderId  = String(data.sender_id   || "");
-    const senderName= String(data.sender_name || "");
-    const content   = String(data.content     || "").trim();
+    const senderId = String(data.sender_id || "");
+    const senderName = String(data.sender_name || "");
+    const content = String(data.content || "").trim();
+
     if (!content) return;
     if (this.userId && senderId === this.userId) return;
     if (senderName.toLowerCase() === this.username.toLowerCase()) return;
+
     this.log(`📨 PM from @${senderName}: "${content}"`);
 
-    // Commands — both parents and sub-parents, PM only for sub-parents
+    // Commands via PM — both parents and sub-parents allowed
     if (isAuthorized(senderName) && content.startsWith("|")) {
       await handleCommand(content, senderName, this, "private");
       return;
     }
 
-    // /a AI trigger
+    // AI direct trigger /a
     if (content.toLowerCase().startsWith("/a ") && this.autoReplyOn) {
-      const q = content.slice(3).trim();
-      this.sendPrivate(senderName, await getAIReply(q).catch(()=>"Error"));
+      const question = content.slice(3).trim();
+      this.log(`🤖 AI Query from @${senderName}: "${question}"`);
+      let reply;
+      try { reply = await getAIReply(question); }
+      catch (e) { reply = "Sorry, couldn't answer right now!"; }
+      this.sendPrivate(senderName, reply);
       return;
     }
 
     if (this.autoReplyOn) {
-      const q = content.replace(new RegExp(TRIGGER,"gi"),"").trim() || content;
-      const key = `pvt:${senderId}:${q.slice(0,80)}`;
+      const question = content.replace(new RegExp(TRIGGER, "gi"), "").trim() || content;
+      const key = `pvt:${senderId}:${question.slice(0, 80)}`;
       if (this.processed.has(key)) return;
       this.processed.add(key);
       if (this.processed.size > 500) this.processed.delete(this.processed.values().next().value);
-      this.sendPrivate(senderName, await getAIReply(q).catch(()=>"Error"));
+      this.log(`💬 PM from @${senderName}: "${question}"`);
+      let reply;
+      try { reply = await getAIReply(question); }
+      catch (e) { reply = "Sorry, couldn't answer right now!"; }
+      this.sendPrivate(senderName, reply);
     }
   }
 
   // ── Handle room message ───────────────────────────────────
   async handleRoom(data) {
-    const senderId  = String(data.sender_id || "");
-    const senderName= String(data.username  || "");
-    const content   = String(data.content   || "").trim();
-    const roomId    = data.room_id;
+    const senderId = String(data.sender_id || "");
+    const senderName = String(data.username || "");
+    const content = String(data.content || "").trim();
+    const roomId = data.room_id;
+
     if (!content) return;
     if (this.userId && senderId === this.userId) return;
     if (senderName.toLowerCase() === this.username.toLowerCase()) return;
 
-    // Room commands — parents only
+    // Room commands — PARENTS ONLY (sub-parents must use PM)
     if (isParent(senderName) && content.startsWith("|")) {
       await handleCommand(content, senderName, this, "room", roomId);
       return;
     }
 
+    // AI direct trigger /a
     if (content.toLowerCase().startsWith("/a ") && this.autoReplyOn) {
-      const q = content.slice(3).trim();
-      this.sendRoom(roomId, `@${senderName} ${await getAIReply(q).catch(()=>"Error")}`);
+      const question = content.slice(3).trim();
+      this.log(`🤖 AI Query from @${senderName} in room ${roomId}: "${question}"`);
+      let reply;
+      try { reply = await getAIReply(question); }
+      catch (e) { reply = "Sorry, couldn't answer right now!"; }
+      this.sendRoom(roomId, `@${senderName} ${reply}`);
       return;
     }
 
     if (this.tryPickVoucher(content, roomId)) return;
 
     if (this.autoReplyOn && content.toLowerCase().includes(TRIGGER)) {
-      const q = content.replace(new RegExp(TRIGGER,"gi"),"").trim() || content;
-      const key = `room:${senderId}:${q.slice(0,80)}`;
+      const question = content.replace(new RegExp(TRIGGER, "gi"), "").trim() || content;
+      const key = `room:${senderId}:${question.slice(0, 80)}`;
       if (this.processed.has(key)) return;
       this.processed.add(key);
       if (this.processed.size > 500) this.processed.delete(this.processed.values().next().value);
-      this.sendRoom(roomId, `@${senderName} ${await getAIReply(q).catch(()=>"Error")}`);
+      this.log(`📢 Room @${senderName}: "${question}"`);
+      let reply;
+      try { reply = await getAIReply(question); }
+      catch (e) { reply = "Sorry, couldn't answer right now!"; }
+      this.sendRoom(roomId, `@${senderName} ${reply}`);
     }
   }
 
-  // ── Connect ───────────────────────────────────────────────
+  // ── Connect socket ─────────────────────────────────────────
   connect(defaultRoom) {
     if (this.reconnTimer) { clearTimeout(this.reconnTimer); this.reconnTimer = null; }
+
     if (this.isTokenExpired()) {
-      this.log("⚠️ Token expired — re-logging in...");
+      this.log("⚠️  Token expired — re-logging in...");
       this.token = null;
-      this.login().then(ok => {
-        if (!ok) { this.reconnTimer = setTimeout(()=>this.connect(defaultRoom), 30_000); }
-        else { this.connect(defaultRoom); }
+      this.login().then((ok) => {
+        if (!ok) {
+          this.log("❌ Re-login failed. Retrying in 30s...");
+          this.reconnTimer = setTimeout(() => this.connect(defaultRoom), 30000);
+        } else {
+          this.connect(defaultRoom);
+        }
       });
       return;
     }
+
     this.log("Connecting...");
-    this.socket = io(API_BASE, { auth:{token:this.token}, transports:["websocket","polling"], reconnection:false });
+
+    this.socket = io(API_BASE, {
+      auth: { token: this.token },
+      transports: ["websocket", "polling"],
+      reconnection: false,
+    });
 
     this.socket.on("connect", async () => {
       this.isConnected = true;
-      this.log(`✓ Connected SID:${this.socket.id}`);
-      await new Promise(r=>setTimeout(r,400));
-      const rooms = this.joinedRooms.size ? [...this.joinedRooms] : [defaultRoom];
+      this.log(`✓ Connected! SID: ${this.socket.id}`);
+      await new Promise((r) => setTimeout(r, 400));
+      const rooms = this.joinedRooms.size > 0 ? [...this.joinedRooms] : [defaultRoom];
       this.joinedRooms.clear();
       for (const r of rooms) this.joinRoom(r);
       if (this.autoTextOn) this.startAutoText();
     });
 
-    this.socket.on("room_joined",      d => { this.joinedRooms.add(Number(d?.room_id)); this.log(`✓ Joined room ${d?.room_id}`); });
-    this.socket.on("user_joined_room", d => this.handleUserJoined(d));
-    this.socket.on("balance_update",   d => (this.balance = d?.balance_cents));
-    this.socket.on("private_message",  d => this.handlePrivate(d).catch(console.error));
-    this.socket.on("new_message",      d => this.handleRoom(d).catch(console.error));
-    this.socket.on("private_message_sent", d => this.log(`✓ PM delivered: "${String(d?.content||"").slice(0,60)}"`));
-
-    this.socket.on("disconnect", reason => {
-      this.isConnected = false;
-      this.log(`! Disconnected: ${reason}`);
-      this.stopAutoText(); this.stopFlood();
-      if (reason === "io client disconnect") return;
-      this.reconnTimer = setTimeout(async () => {
-        if (this.isTokenExpired()) {
-          this.token = null;
-          const ok = await this.login();
-          if (!ok) { this.reconnTimer = setTimeout(()=>this.connect(defaultRoom), 30_000); return; }
-        }
-        this.connect(defaultRoom);
-      }, 5_000);
+    this.socket.on("room_joined", (d) => {
+      this.joinedRooms.add(Number(d?.room_id));
+      this.log(`✓ Joined room ${d?.room_id} (${d?.members?.length || 0} members)`);
     });
 
-    this.socket.on("connect_error", e => {
+    this.socket.on("user_joined_room", (d) => this.handleUserJoined(d));
+    this.socket.on("balance_update", (d) => (this.balance = d?.balance_cents));
+    this.socket.on("private_message", (d) => this.handlePrivate(d).catch(console.error));
+    this.socket.on("new_message", (d) => this.handleRoom(d).catch(console.error));
+    this.socket.on("private_message_sent", (d) =>
+      this.log(`✓ PM delivered: "${String(d?.content || "").slice(0, 60)}"`)
+    );
+
+    this.socket.on("disconnect", (reason) => {
       this.isConnected = false;
-      this.log(`! Connect error: ${e.message}`);
-      this.reconnTimer = setTimeout(()=>this.connect(defaultRoom), 8_000);
+      this.log(`! Disconnected: ${reason}`);
+      this.stopAutoText();
+      this.stopFlood();
+      if (reason === "io client disconnect") return;
+      const delay = 5000;
+      this.log(`Reconnecting in ${delay / 1000}s...`);
+      this.reconnTimer = setTimeout(async () => {
+        if (this.isTokenExpired()) {
+          this.log("⚠️  Token expired — re-logging in...");
+          this.token = null;
+          const ok = await this.login();
+          if (!ok) {
+            this.log("❌ Re-login failed. Retrying in 30s...");
+            this.reconnTimer = setTimeout(() => this.connect(defaultRoom), 30000);
+            return;
+          }
+        }
+        this.connect(defaultRoom);
+      }, delay);
+    });
+
+    this.socket.on("connect_error", (e) => {
+      this.isConnected = false;
+      this.log(`! Connect error: ${e.message} — retry in 8s`);
+      this.reconnTimer = setTimeout(() => this.connect(defaultRoom), 8000);
     });
 
     if (DEBUG) {
-      const SKIP = ["room_count_update","private_user_typing","user_joined","user_left",
-        "user_left_room","user_joined_room","room_joined","new_message","private_message",
-        "private_message_sent","system_message","uno_state","balance_update","connect","disconnect"];
-      this.socket.onAny((ev,d) => { if (!SKIP.includes(ev)) this.log(`[evt] "${ev}": ${JSON.stringify(d).slice(0,150)}`); });
+      this.socket.onAny((event, data) => {
+        const SKIP = [
+          "room_count_update", "private_user_typing", "user_joined", "user_left",
+          "user_left_room", "user_joined_room", "room_joined", "new_message",
+          "private_message", "private_message_sent", "system_message",
+          "uno_state", "balance_update", "connect", "disconnect",
+        ];
+        if (!SKIP.includes(event))
+          this.log(`[evt] "${event}": ${JSON.stringify(data).slice(0, 150)}`);
+      });
     }
   }
 
   disconnect() {
     if (this.reconnTimer) clearTimeout(this.reconnTimer);
-    this.stopAutoText(); this.stopFlood();
+    this.stopAutoText();
+    this.stopFlood();
     if (this.socket) this.socket.disconnect();
     this.isConnected = false;
   }
 }
 
 // ══════════════════════════════════════════════════════════════
-//  ACCOUNT MAP
+//  MULTI-ACCOUNT MANAGER
 // ══════════════════════════════════════════════════════════════
 const accounts = new Map();
 
-// $aa = all accounts that are NOT mother/parent/sub-parent
+// ── Helper: get all sub-accounts (excludes mother, parents, sub-parents) ─
 function getAllSubAccounts() {
   return [...accounts.values()].filter(
-    a => !isMother(a.username) && !isParent(a.username) && !isSubParent(a.username)
+    (a) => !isMother(a.username) && !isParent(a.username) && !isSubParent(a.username)
   );
 }
 
 // ══════════════════════════════════════════════════════════════
-//  COMMAND HANDLER
+//  UNIFIED COMMAND HANDLER
 //  source: "private" | "room"
+//  sourceRoomId: room the command came from (when source=room)
 // ══════════════════════════════════════════════════════════════
-async function handleCommand(content, senderName, callerAccount, source, sourceRoomId=null) {
-  let cmd = content.trim();
+async function handleCommand(content, senderName, callerAccount, source, sourceRoomId = null) {
+  // ── BUG FIX: Work on a copy so we can strip $ tokens later
+  //    but check permissions on the ORIGINAL cmd first
+  const originalCmd = content.trim();
+  let cmd = originalCmd;
+
   const isFullParent = isParent(senderName);
-  const isSubP       = isSubParent(senderName);
+  const isSubP = isSubParent(senderName) && !isFullParent;
 
-  // Sub-parents: PM only
-  if (isSubP && !isFullParent && source === "room") return;
+  // Sub-parents can only use PM
+  if (isSubP && source === "room") return;
 
-  console.log(`\n[${isFullParent?"👑 PARENT":"👤 SUB-PARENT"}][${source.toUpperCase()}] @${senderName} → "${cmd}"`);
+  console.log(`\n[${isFullParent ? "👑 PARENT" : "👤 SUB-PARENT"}][${source.toUpperCase()}] @${senderName} → "${cmd}"`);
 
-  // Reply always goes to PM
-  const reply = text => callerAccount.sendPrivate(senderName, text);
+  // ── Reply helper: PM back the sender always ───────────────
+  const reply = (text) => callerAccount.sendPrivate(senderName, text);
 
-  // ── Resolve targets ($aa or $name) ───────────────────────
+  // ── PARENT-ONLY command guard (check BEFORE stripping $) ──
+  // BUG FIX: must check on original cmd before $ tokens are removed
+  const parentOnlyPattern = /^\|(ap|rp|asp|rsp|lnu|ltu)\b/i;
+  if (parentOnlyPattern.test(cmd) && !isFullParent) {
+    reply(`❌ Permission denied. Only full parents can use this command.`);
+    return;
+  }
+
+  // ── Resolve target accounts ───────────────────────────────
+  //   $aa  = all sub-accounts (not mother)
+  //   $username = specific account
+  //   (none) = caller account itself
   let targetAccounts = [];
-  let isAllAccounts  = false;
+  let isAllAccounts = false;
 
   const dollarMatches = [...cmd.matchAll(/\$(\w+)/g)];
   if (dollarMatches.length > 0) {
-    for (const m of dollarMatches) {
-      const tok = m[1].toLowerCase();
-      if (tok === "aa") {
-        isAllAccounts  = true;
+    for (const match of dollarMatches) {
+      const token = match[1].toLowerCase();
+      if (token === "aa") {
+        isAllAccounts = true;
         targetAccounts = getAllSubAccounts();
-        if (!targetAccounts.length) { reply("❌ No sub-accounts logged in. Use |lnu first."); return; }
+        if (targetAccounts.length === 0) {
+          reply(`❌ No sub-accounts are currently logged in. Use |lnu to add accounts first.`);
+          return;
+        }
         break;
-      } else if (accounts.has(tok)) {
-        targetAccounts.push(accounts.get(tok));
+      } else if (accounts.has(token)) {
+        targetAccounts.push(accounts.get(token));
       } else {
-        reply(`❌ Unknown account $${tok}. Use |accounts to list.`);
+        reply(`❌ Unknown account $${token}. Use |accounts to see active accounts.`);
         return;
       }
     }
+    // Strip $ tokens from cmd AFTER permission checks
     cmd = cmd.replace(/\s*\$\w+/g, "").trim();
   } else {
-    // Legacy @username
-    const m = cmd.match(/^\|\w+\s+@(\w+)/);
-    if (m) {
-      const n = m[1].toLowerCase();
-      if (accounts.has(n)) targetAccounts.push(accounts.get(n));
-      else { reply(`❌ Unknown account @${m[1]}`); return; }
+    // Legacy @username targeting
+    const atMatch = cmd.match(/^\|\w+\s+@(\w+)/);
+    if (atMatch) {
+      const acctName = atMatch[1].toLowerCase();
+      if (accounts.has(acctName)) {
+        targetAccounts.push(accounts.get(acctName));
+      } else {
+        reply(`❌ Unknown account @${acctName}`);
+        return;
+      }
     }
   }
 
   const target = targetAccounts.length > 0 ? targetAccounts[0] : callerAccount;
 
-  // Parent-only guard
-  if (/^\|(ap|rp|asp|rsp|lnu|ltu)\b/i.test(cmd) && !isFullParent) {
-    reply("❌ Permission denied. Full parents only."); return;
-  }
-  // $aa guard for sub-parents
-  if (isAllAccounts && /^\|(jr|lr|flood|autoflood)\b/i.test(cmd) && !isFullParent) {
-    reply("❌ Sub-parents cannot use $aa with this command."); return;
-  }
-
-  // ══════════════════════════════════════════════════════════
-  //  |lnu — LOGIN NEW USER(S)
-  //  Supports:  |lnu username:password
-  //             |lnu user1:pass1;user2:pass2
-  //  Password may contain colons — only the FIRST colon splits user:pass
-  // ══════════════════════════════════════════════════════════
-  const lnuMatch = cmd.match(/^\|lnu\s+(.+)/i);
-  if (lnuMatch) {
-    const entries = lnuMatch[1].trim().split(";").map(s=>s.trim()).filter(Boolean);
-    let ok=0, fail=0;
-    for (const entry of entries) {
-      const colon = entry.indexOf(":");
-      if (colon === -1) { reply(`❌ Bad format: "${entry}" — use username:password`); continue; }
-      const uname = entry.slice(0, colon).trim();
-      const pwd   = entry.slice(colon + 1).trim();
-      if (!uname || !pwd) { reply(`❌ Empty user or pass in: "${entry}"`); continue; }
-      if (accounts.has(uname.toLowerCase())) { reply(`⚠️ @${uname} already logged in`); continue; }
-      reply(`⏳ Logging in @${uname}...`);
-      const acc = new BotAccount({ username:uname, password:pwd });
-      const loggedIn = await acc.login();
-      if (!loggedIn) { reply(`❌ Login failed for @${uname} — check credentials`); fail++; continue; }
-      accounts.set(uname.toLowerCase(), acc);
-      acc.connect(ROOM_ID);
-      reply(`✅ @${uname} logged in and connected to room ${ROOM_ID}`);
-      ok++;
-    }
-    if (entries.length > 1) reply(`📊 Done: ${ok} success, ${fail} failed`);
+  // ── $aa guard for sensitive commands ─────────────────────
+  const aaRestrictedPattern = /^\|(jr|lr|flood|autoflood)\b/i;
+  if (isAllAccounts && aaRestrictedPattern.test(cmd) && !isFullParent) {
+    reply(`❌ Sub-parents cannot use $aa with this command. Only full parents can.`);
     return;
   }
 
-  // ── |ltu — logout ─────────────────────────────────────────
-  const ltuMatch = cmd.match(/^\|ltu\s+(\w+)/i);
-  if (ltuMatch) {
-    const uname = ltuMatch[1].toLowerCase();
+  // ══════════════════════════════════════════════════════════
+  //  ACCOUNT MANAGEMENT  (parent only — already guarded above)
+  // ══════════════════════════════════════════════════════════
+
+  // BUG FIX: |lnu parsing — split only on first colon per credential
+  // This correctly handles passwords that contain colons or special chars
+  const multiLoginMatch = cmd.match(/^\|lnu\s+(.+)/i);
+  if (multiLoginMatch) {
+    const rawInput = multiLoginMatch[1].trim();
+    // Multiple accounts separated by semicolons: user1:pass1;user2:pass2
+    const credentials = rawInput.split(";").map((s) => s.trim()).filter(Boolean);
+    let successCount = 0, failCount = 0;
+
+    for (const cred of credentials) {
+      // Split only on the FIRST colon — passwords may contain colons or special chars (#@! etc)
+      const colonIdx = cred.indexOf(":");
+      if (colonIdx === -1) {
+        reply(`❌ Invalid format: "${cred}"\nUse: |lnu username:password`);
+        continue;
+      }
+      const uname = cred.slice(0, colonIdx).trim();
+      const pwd   = cred.slice(colonIdx + 1).trim();
+
+      if (!uname || !pwd) {
+        reply(`❌ Empty username or password in: "${cred}"`);
+        continue;
+      }
+      if (accounts.has(uname.toLowerCase())) {
+        reply(`⚠️ @${uname} is already logged in`);
+        continue;
+      }
+
+      reply(`⏳ Logging in @${uname}...`);
+      const acc = new BotAccount({ username: uname, password: pwd });
+      const ok = await acc.login();
+
+      if (!ok) {
+        reply(`❌ Login failed for @${uname} — check username/password`);
+        failCount++;
+        continue;
+      }
+
+      accounts.set(uname.toLowerCase(), acc);
+      acc.connect(ROOM_ID);
+      reply(`✅ @${uname} logged in and connected to room ${ROOM_ID}`);
+      successCount++;
+    }
+
+    if (credentials.length > 1) {
+      reply(`📊 Multi-login done: ${successCount} success, ${failCount} failed`);
+    }
+    return;
+  }
+
+  const logoutMatch = cmd.match(/^\|ltu\s+(\w+)/i);
+  if (logoutMatch) {
+    const uname = logoutMatch[1].toLowerCase();
     if (isMother(uname)) { reply("❌ Cannot logout mother account"); return; }
     const acc = accounts.get(uname);
     if (!acc) { reply(`❌ @${uname} not logged in`); return; }
-    acc.disconnect(); accounts.delete(uname);
-    reply(`✅ @${uname} logged out`); return;
+    acc.disconnect();
+    accounts.delete(uname);
+    reply(`✅ @${uname} logged out`);
+    return;
   }
 
-  // ── |accounts ─────────────────────────────────────────────
   if (/^\|accounts/i.test(cmd)) {
-    const list = [...accounts.values()].map(a => {
-      const tag = isMother(a.username) ? " 👑" : "";
-      return `  @${a.username}${tag} ${a.isConnected?"🟢":"🔴"} rooms:[${[...a.joinedRooms].join(",")||"none"}]`;
-    }).join("\n");
-    reply(`👥 Active (${accounts.size}):\n${list}`); return;
+    const list = [...accounts.values()]
+      .map((a) => {
+        const tag = isMother(a.username) ? " 👑" : "";
+        return `  @${a.username}${tag} ${a.isConnected ? "🟢" : "🔴"} rooms:[${[...a.joinedRooms].join(",") || "none"}]`;
+      })
+      .join("\n");
+    reply(`👥 Active (${accounts.size}):\n${list}`);
+    return;
   }
 
   // ══════════════════════════════════════════════════════════
   //  ROOM MANAGEMENT
   // ══════════════════════════════════════════════════════════
+
   const joinMatch = cmd.match(/^\|jr\s+(\d+)/i);
   if (joinMatch) {
-    const rid = joinMatch[1];
-    const accs = isAllAccounts ? getAllSubAccounts() : targetAccounts.length ? targetAccounts : [target];
-    if (isAllAccounts && !accs.length) { reply("❌ No sub-accounts logged in"); return; }
-    for (const a of accs) a.joinRoom(rid);
-    reply(`✅ ${accs.map(a=>`@${a.username}`).join(", ")} → joining room ${rid}`); return;
+    const roomId = joinMatch[1];
+    if (isAllAccounts) {
+      const subAccs = getAllSubAccounts();
+      if (subAccs.length === 0) { reply(`❌ No sub-accounts logged in`); return; }
+      for (const acc of subAccs) acc.joinRoom(roomId);
+      const names = subAccs.map((a) => `@${a.username}`).join(", ");
+      reply(`✅ All sub-accounts joining room ${roomId}:\n${names}`);
+    } else if (targetAccounts.length > 0) {
+      for (const acc of targetAccounts) acc.joinRoom(roomId);
+      const names = targetAccounts.map((a) => `@${a.username}`).join(", ");
+      reply(`✅ ${names} → Joining room ${roomId}`);
+    } else {
+      target.joinRoom(roomId);
+      reply(`✅ @${target.username} joining room ${roomId}`);
+    }
+    return;
   }
 
   if (/^\|lr\s+all/i.test(cmd)) {
     if (isAllAccounts) {
-      let n=0; for (const a of getAllSubAccounts()) n+=a.leaveAll();
-      reply(`✅ All sub-accounts left all rooms (${n} total)`);
+      let total = 0;
+      for (const acc of getAllSubAccounts()) total += acc.leaveAll();
+      reply(`✅ All sub-accounts left all their rooms (${total} total)`);
     } else {
-      reply(`✅ @${target.username} left all rooms (${target.leaveAll()})`);
+      const count = target.leaveAll();
+      reply(`✅ @${target.username} left all rooms (${count})`);
     }
     return;
   }
 
   const leaveMatch = cmd.match(/^\|lr\s+(\d+)/i);
   if (leaveMatch) {
-    const rid = leaveMatch[1];
+    const roomId = leaveMatch[1];
     if (isAllAccounts) {
-      const accs = getAllSubAccounts().filter(a=>a.joinedRooms.has(Number(rid)));
-      if (!accs.length) { reply(`⚠️ No sub-accounts are in room ${rid}`); return; }
-      for (const a of accs) a.leaveRoom(rid);
-      reply(`✅ Left room ${rid}: ${accs.map(a=>`@${a.username}`).join(", ")}`);
+      const subAccs = getAllSubAccounts().filter((a) => a.joinedRooms.has(Number(roomId)));
+      if (subAccs.length === 0) { reply(`⚠️ No sub-accounts are in room ${roomId}`); return; }
+      for (const acc of subAccs) acc.leaveRoom(roomId);
+      const names = subAccs.map((a) => `@${a.username}`).join(", ");
+      reply(`✅ Left room ${roomId}:\n${names}`);
+    } else if (targetAccounts.length > 0) {
+      for (const acc of targetAccounts) acc.leaveRoom(roomId);
+      reply(`✅ ${targetAccounts.map((a) => `@${a.username}`).join(", ")} left room ${roomId}`);
     } else {
-      const accs = targetAccounts.length ? targetAccounts : [target];
-      for (const a of accs) a.leaveRoom(rid);
-      reply(`✅ ${accs.map(a=>`@${a.username}`).join(", ")} left room ${rid}`);
+      target.leaveRoom(roomId);
+      reply(`✅ @${target.username} left room ${roomId}`);
     }
     return;
   }
 
-  const trMatch = cmd.match(/^\|tr\s+(\d+)\s+(.+)/i);
-  if (trMatch) { target.sendRoom(trMatch[1], trMatch[2].trim()); reply(`✅ Sent to room ${trMatch[1]} as @${target.username}`); return; }
+  const textRoomMatch = cmd.match(/^\|tr\s+(\d+)\s+(.+)/i);
+  if (textRoomMatch) {
+    target.sendRoom(textRoomMatch[1], textRoomMatch[2].trim());
+    reply(`✅ Sent to room ${textRoomMatch[1]} as @${target.username}`);
+    return;
+  }
 
   const addRoomMatch = cmd.match(/^\|addroom\s+(.+)/i);
   if (addRoomMatch) {
-    for (const r of addRoomMatch[1].split(",")) {
-      const [n,id] = r.split(/[:=]/).map(s=>s.trim());
-      if (!n||!id) { reply(`❌ Invalid: "${r}" — use Name=ID`); continue; }
-      addRoom(n,id); reply(`✅ Added room: ${n}=${id}`);
+    const roomsToAdd = addRoomMatch[1].split(",");
+    for (const room of roomsToAdd) {
+      const parts = room.split(/[:=]/).map((s) => s.trim());
+      if (parts.length !== 2 || !parts[0] || !parts[1]) { reply(`❌ Invalid: "${room}". Use Name=ID`); continue; }
+      addRoom(parts[0], parts[1]);
+      reply(`✅ Added room: ${parts[0]}=${parts[1]}`);
     }
     return;
   }
 
-  const rmRoomMatch = cmd.match(/^\|removeroom\s+(.+)/i);
-  if (rmRoomMatch) {
-    for (const r of rmRoomMatch[1].split(",")) {
-      const n = r.split(/[:=]/)[0].trim();
-      if (ROOM_LIST.has(n)) { removeRoom(n); reply(`✅ Removed: ${n}`); }
-      else { reply(`❌ Room "${n}" not found`); }
+  const removeRoomMatch = cmd.match(/^\|removeroom\s+(.+)/i);
+  if (removeRoomMatch) {
+    const roomsToRemove = removeRoomMatch[1].split(",");
+    for (const room of roomsToRemove) {
+      const name = room.split(/[:=]/)[0].trim();
+      if (ROOM_LIST.has(name)) { removeRoom(name); reply(`✅ Removed room: ${name}`); }
+      else { reply(`❌ Room "${name}" not found`); }
     }
     return;
   }
 
-  if (/^\|listroom/i.test(cmd)) { reply(`📋 Rooms:\n${listRooms()}`); return; }
+  if (/^\|listroom/i.test(cmd)) {
+    reply(`📋 Room List:\n${listRooms()}`);
+    return;
+  }
 
   // ══════════════════════════════════════════════════════════
-  //  FLOOD
+  //  FLOOD SYSTEM
   // ══════════════════════════════════════════════════════════
-  const floodMatch = cmd.match(/^\|flood\s+(\d+)\s+(.+)/i);
-  if (floodMatch) {
-    const rid = floodMatch[1], txt = floodMatch[2].trim();
-    const accs = isAllAccounts ? getAllSubAccounts() : targetAccounts.length ? targetAccounts : null;
-    if (!accs) { reply(`❌ Specify: |flood ${rid} <text> $username  or  $aa`); return; }
-    if (!accs.length) { reply("❌ No sub-accounts logged in"); return; }
-    for (const a of accs) if (a.startCustomFlood(rid,txt)) reply(`🌊 CUSTOM FLOOD @${a.username} room:${rid}`);
+
+  const customFloodMatch = cmd.match(/^\|flood\s+(\d+)\s+(.+)/i);
+  if (customFloodMatch) {
+    const roomId = customFloodMatch[1];
+    const floodText = customFloodMatch[2].trim();
+
+    const floodTargets = isAllAccounts
+      ? getAllSubAccounts()
+      : targetAccounts.length > 0 ? targetAccounts : null;
+
+    if (!floodTargets) {
+      reply(`❌ Specify account: |flood ${roomId} <text> $username  or  $aa for all`);
+      return;
+    }
+    if (floodTargets.length === 0) { reply(`❌ No sub-accounts logged in`); return; }
+
+    for (const acc of floodTargets) {
+      if (acc.startCustomFlood(roomId, floodText)) {
+        reply(`🌊 CUSTOM FLOOD by @${acc.username}\nRoom: ${roomId} | Text: "${floodText}"`);
+      }
+    }
+    if (isAllAccounts) reply(`🌊 Custom flood started on ${floodTargets.length} accounts`);
     return;
   }
 
-  const afMatch = cmd.match(/^\|autoflood\s+(\d+)/i);
-  if (afMatch) {
-    const rid = afMatch[1];
-    const accs = isAllAccounts ? getAllSubAccounts() : targetAccounts.length ? targetAccounts : null;
-    if (!accs) { reply(`❌ Specify: |autoflood ${rid} $username  or  $aa`); return; }
-    if (!accs.length) { reply("❌ No sub-accounts logged in"); return; }
-    for (const a of accs) {
-      if (a.startAutoFlood(rid)) reply(`🌊 AUTO FLOOD @${a.username} room:${rid} ${a.floodMessages.length} msgs`);
-      else reply(`❌ @${a.username}: check flood.txt`);
+  const autoFloodMatch = cmd.match(/^\|autoflood\s+(\d+)/i);
+  if (autoFloodMatch) {
+    const roomId = autoFloodMatch[1];
+
+    const floodTargets = isAllAccounts
+      ? getAllSubAccounts()
+      : targetAccounts.length > 0 ? targetAccounts : null;
+
+    if (!floodTargets) {
+      reply(`❌ Specify account: |autoflood ${roomId} $username  or  $aa for all`);
+      return;
     }
+    if (floodTargets.length === 0) { reply(`❌ No sub-accounts logged in`); return; }
+
+    let started = 0;
+    for (const acc of floodTargets) {
+      if (acc.startAutoFlood(roomId)) {
+        reply(`🌊 AUTO FLOOD by @${acc.username}\nRoom: ${roomId} | ${acc.floodMessages.length} msgs from flood.txt`);
+        started++;
+      } else {
+        reply(`❌ @${acc.username}: failed — check flood.txt`);
+      }
+    }
+    if (isAllAccounts && started > 0) reply(`🌊 Auto flood started on ${started} accounts`);
     return;
   }
 
   if (/^\|flood\s+stop/i.test(cmd)) {
-    const accs = isAllAccounts ? getAllSubAccounts() : targetAccounts.length ? targetAccounts : [target];
-    for (const a of accs) a.stopFlood();
-    reply(`🛑 FLOOD STOPPED: ${accs.map(a=>`@${a.username}`).join(", ")}`); return;
+    const stopTargets = isAllAccounts
+      ? getAllSubAccounts()
+      : targetAccounts.length > 0 ? targetAccounts : [target];
+
+    for (const acc of stopTargets) acc.stopFlood();
+    const names = stopTargets.map((a) => `@${a.username}`).join(", ");
+    reply(`🛑 FLOOD STOPPED: ${names}`);
+    return;
   }
 
   if (/^\|flood\s+reload/i.test(cmd)) {
-    const msgs = loadLines("flood.txt");
-    reply(`✅ Reloaded ${msgs.length} msgs from flood.txt`); return;
+    const messages = loadFloodTexts();
+    reply(`✅ Reloaded ${messages.length} messages from flood.txt`);
+    return;
   }
 
   // ══════════════════════════════════════════════════════════
-  //  FRIENDS & BALANCE
+  //  FRIENDS
   // ══════════════════════════════════════════════════════════
-  // ── |sf — send friend request ───────────────────────────
-  const sfMatch = cmd.match(/^\|sf\s+(\w+)/i);
-  if (sfMatch) {
-    const r = await target.sendFriendRequest(sfMatch[1]);
+
+  // Send friend request: |sf <username> [$acc]
+  const sendFriendMatch = cmd.match(/^\|sf\s+(\w+)/i);
+  if (sendFriendMatch) {
+    const r = await target.sendFriendRequest(sendFriendMatch[1]);
     const ok = r.status < 400;
-    reply(`${ok?"✅":"❌"} Friend request to @${sfMatch[1]} from @${target.username}` +
-          (ok ? "" : `\nError: ${JSON.stringify(r.data).slice(0,100)}`));
+    const msg = r.data?.message || r.data?.data?.message || JSON.stringify(r.data).slice(0, 80);
+    reply(`${ok ? "✅" : "❌"} Friend request → @${sendFriendMatch[1]} from @${target.username}: ${msg}`);
     return;
   }
 
-  // ── |af <id> — accept specific friend request ────────────
-  const afFriendMatch = cmd.match(/^\|af\s+(\d+)/i);
-  if (afFriendMatch) {
-    const r = await target.acceptFriendRequest(afFriendMatch[1]);
+  // Accept friend request by ID: |af <request_id> [$acc]
+  const acceptMatch = cmd.match(/^\|af\s+(\d+)/i);
+  if (acceptMatch) {
+    const r = await target.acceptFriendRequest(acceptMatch[1]);
     const ok = r.status < 400;
-    reply(`${ok?"✅":"❌"} ${ok?"Accepted":"Failed"} friend request #${afFriendMatch[1]} on @${target.username}` +
-          (ok ? "" : `\nError: ${JSON.stringify(r.data).slice(0,100)}`));
+    const msg = r.data?.message || r.data?.data?.message || JSON.stringify(r.data).slice(0, 80);
+    reply(`${ok ? "✅" : "❌"} Accepted request #${acceptMatch[1]} on @${target.username}: ${msg}`);
     return;
   }
 
-  // ── |afa — accept ALL pending friend requests ─────────────
-  if (/^\|afa/i.test(cmd)) {
-    reply(`⏳ Accepting all friend requests for @${target.username}...`);
-    const { accepted, failed, list } = await target.acceptAllFriendRequests();
-    if (!accepted && !failed) { reply(`📭 No pending requests on @${target.username}`); return; }
-    const summary = `📬 @${target.username}: ${accepted} accepted, ${failed} failed`;
-    const detail  = list.join("\n");
-    reply(`${summary}\n${detail}`);
-    return;
-  }
-
-  // ── |fr — list pending friend requests ───────────────────
-  if (/^\|fr/i.test(cmd)) {
+  // Accept ALL pending friend requests: |aaf [$acc]
+  if (/^\|aaf/i.test(cmd)) {
     const r = await target.getFriendRequests();
-    const reqs = Array.isArray(r.data) ? r.data : (r.data?.requests || r.data?.data || []);
-    if (!reqs.length) { reply(`📭 No pending requests on @${target.username}`); return; }
-    const list = reqs.slice(0,15).map(q =>
-      `  ID:${q.id||q.request_id} from @${q.username||q.sender?.username||"?"}`
-    ).join("\n");
-    reply(`📬 Requests on @${target.username} (${reqs.length}):\n${list}` +
-          (reqs.length>15 ? `\n  ...and ${reqs.length-15} more` : ""));
+    const requests = Array.isArray(r.data) ? r.data : (r.data?.requests || r.data?.data || []);
+    if (!requests.length) { reply(`📭 No pending requests on @${target.username}`); return; }
+    reply(`⏳ Accepting ${requests.length} request(s) on @${target.username}...`);
+    let accepted = 0, failed = 0;
+    for (const rq of requests) {
+      const rid = rq.id || rq.request_id;
+      if (!rid) { failed++; continue; }
+      const ar = await target.acceptFriendRequest(rid);
+      if (ar.status < 400) { accepted++; }
+      else { failed++; }
+      // Small delay to avoid rate limiting
+      await new Promise((res) => setTimeout(res, 300));
+    }
+    reply(`✅ @${target.username} — Accepted: ${accepted}, Failed: ${failed}`);
     return;
   }
 
-  // ── |fl — list friends ────────────────────────────────────
-  if (/^\|fl/i.test(cmd)) {
-    const r = await target.getFriends();
+  // List pending friend requests: |fr [$acc]
+  if (/^\|fr\b/i.test(cmd)) {
+    const r = await target.getFriendRequests();
+    const requests = Array.isArray(r.data) ? r.data : (r.data?.requests || r.data?.data || []);
+    if (!requests.length) { reply(`📭 No pending requests on @${target.username}`); return; }
+    const list = requests.slice(0, 15)
+      .map((rq) => `  ID:${rq.id || rq.request_id} from @${rq.username || rq.sender?.username || "?"}`)
+      .join("\n");
+    reply(`📬 Pending requests on @${target.username} (${requests.length}):\n${list}`);
+    return;
+  }
+
+  // List friends: |fl [$acc]
+  if (/^\|fl\b/i.test(cmd)) {
+    const r = await target.getFriendsList();
     const friends = Array.isArray(r.data) ? r.data : (r.data?.friends || r.data?.data || []);
-    if (!friends.length) { reply(`👥 @${target.username} has no friends yet`); return; }
-    const list = friends.slice(0,20).map(f=>
-      `  @${f.username||f.friend?.username||"?"}`
-    ).join("\n");
-    reply(`👥 Friends of @${target.username} (${friends.length}):\n${list}` +
-          (friends.length>20 ? `\n  ...and ${friends.length-20} more` : ""));
+    if (!friends.length) { reply(`📭 @${target.username} has no friends listed`); return; }
+    const list = friends.slice(0, 20)
+      .map((f) => `  @${f.username || f.friend?.username || "?"}`)
+      .join("\n");
+    reply(`👥 Friends of @${target.username} (${friends.length}):\n${list}`);
     return;
   }
 
-  // ── |balance — check balance ──────────────────────────────
-  if (/^\|balance/i.test(cmd)) {
+  // Balance: |balance [$acc]
+  if (/^\|balance\b/i.test(cmd)) {
     const r = await target.getAccount();
-    const bal = r.data?.balance_cents
-             ?? r.data?.data?.balance_cents
-             ?? target.balance
-             ?? "unknown";
-    reply(`💰 @${target.username}: ${bal} cents`);
+    const b = r.data?.balance_cents ?? r.data?.data?.balance_cents ?? target.balance ?? "unknown";
+    if (typeof b === "number") target.balance = b;
+    reply(`💰 @${target.username}: ${b} coins`);
     return;
   }
 
-  // ── |pin — check if PIN is configured ────────────────────
-  if (/^\|pin/i.test(cmd)) {
+  // ══════════════════════════════════════════════════════════
+  //  COIN TRANSFER
+  //  |send <to_username> <amount> <pin> [$acc]
+  //  |send faysal 100 333666 $firefox
+  //
+  //  |sendall <to_username> <amount> <pin>
+  //    → sends from ALL sub-accounts (useful for collecting coins)
+  //
+  //  |pincheck [$acc]   → check if PIN is set on account
+  // ══════════════════════════════════════════════════════════
+
+  // PIN status check: |pincheck [$acc]
+  if (/^\|pincheck\b/i.test(cmd)) {
     const r = await target.getPinStatus();
-    const hasPin = r.data?.has_pin ?? r.data?.pin_set ?? r.data?.data?.has_pin ?? null;
-    if (hasPin === null) reply(`⚙️ @${target.username} PIN status: ${JSON.stringify(r.data).slice(0,100)}`);
-    else reply(`${hasPin?"✅":"❌"} @${target.username} PIN is ${hasPin?"configured":"NOT set"}`);
+    const hasPin = r.data?.has_pin ?? r.data?.data?.has_pin ?? r.data?.pin_set ?? "unknown";
+    reply(`🔐 @${target.username} PIN status: ${hasPin === true ? "✅ PIN is set" : hasPin === false ? "❌ No PIN set" : JSON.stringify(r.data).slice(0, 80)}`);
     return;
   }
 
-  // ── |send <to> <amount> <pin> — transfer coins ────────────
-  // Usage:  |send faysal 10 333666 $acc
-  // Optional flag $tag to announce transfer publicly
-  const sendMatch = cmd.match(/^\|send\s+(\w+)\s+(\d+)\s+(\S+)(?:\s+(tag))?/i);
-  if (sendMatch) {
-    const toUser  = sendMatch[1];
-    const amount  = Number(sendMatch[2]);
-    const pin     = sendMatch[3];
-    const sendTag = !!sendMatch[4];
+  // Transfer coins: |send <to> <amount> <pin> [$acc]
+  const sendCoinsMatch = cmd.match(/^\|send\s+(\w+)\s+(\d+)\s+(\S+)/i);
+  if (sendCoinsMatch) {
+    const [, toUser, amount, pin] = sendCoinsMatch;
 
-    if (amount <= 0) { reply("❌ Amount must be greater than 0"); return; }
+    if (isAllAccounts) {
+      // |send faysal 100 333666 $aa  → all sub-accounts each send
+      const subAccs = getAllSubAccounts();
+      if (subAccs.length === 0) { reply(`❌ No sub-accounts logged in`); return; }
+      reply(`⏳ Sending ${amount} coins → @${toUser} from ${subAccs.length} accounts...`);
+      let ok = 0, fail = 0;
+      for (const acc of subAccs) {
+        const r = await acc.transferCoins(toUser, amount, pin);
+        if (r.status < 400) {
+          ok++;
+          const msg = r.data?.message || r.data?.data?.message || "OK";
+          reply(`  ✅ @${acc.username} → @${toUser} (${amount} coins): ${msg}`);
+        } else {
+          fail++;
+          const msg = r.data?.message || r.data?.data?.message || r.data?.error || JSON.stringify(r.data).slice(0, 80);
+          reply(`  ❌ @${acc.username} failed: ${msg}`);
+        }
+        await new Promise((res) => setTimeout(res, 400));
+      }
+      reply(`📊 Transfer done: ${ok} success, ${fail} failed`);
+    } else {
+      // Single account transfer
+      reply(`⏳ Sending ${amount} coins from @${target.username} → @${toUser}...`);
+      const r = await target.transferCoins(toUser, amount, pin);
+      if (r.status < 400) {
+        const msg = r.data?.message || r.data?.data?.message || "Transfer successful";
+        const newBal = r.data?.balance_cents ?? r.data?.data?.balance_cents;
+        let replyMsg = `✅ @${target.username} → @${toUser}: ${amount} coins sent!\n  ${msg}`;
+        if (newBal !== undefined) replyMsg += `\n  New balance: ${newBal} coins`;
+        reply(replyMsg);
+      } else {
+        const msg = r.data?.message || r.data?.data?.message || r.data?.error || JSON.stringify(r.data).slice(0, 120);
+        reply(`❌ Transfer failed from @${target.username}: ${msg}`);
+      }
+    }
+    return;
+  }
 
-    reply(`⏳ @${target.username} sending ${amount} coins to @${toUser}...`);
+  // Collect all coins to one account: |collect <to_username> <amount_each> <pin>
+  // Shorthand for sending from all sub-accounts to a single destination
+  const collectMatch = cmd.match(/^\|collect\s+(\w+)\s+(\d+)\s+(\S+)/i);
+  if (collectMatch) {
+    if (!isFullParent) { reply(`❌ Only full parents can use |collect`); return; }
+    const [, toUser, amount, pin] = collectMatch;
+    const subAccs = getAllSubAccounts();
+    if (subAccs.length === 0) { reply(`❌ No sub-accounts logged in`); return; }
+    reply(`⏳ Collecting ${amount} coins each from ${subAccs.length} sub-accounts → @${toUser}...`);
+    let ok = 0, fail = 0, totalSent = 0;
+    for (const acc of subAccs) {
+      const r = await acc.transferCoins(toUser, amount, pin);
+      if (r.status < 400) {
+        ok++;
+        totalSent += Number(amount);
+        const msg = r.data?.message || r.data?.data?.message || "OK";
+        reply(`  ✅ @${acc.username} → ${amount} coins: ${msg}`);
+      } else {
+        fail++;
+        const msg = r.data?.message || r.data?.data?.message || r.data?.error || JSON.stringify(r.data).slice(0, 80);
+        reply(`  ❌ @${acc.username}: ${msg}`);
+      }
+      await new Promise((res) => setTimeout(res, 400));
+    }
+    reply(`📊 Collect done: ${ok} success, ${fail} failed\n  Total sent: ${totalSent} coins → @${toUser}`);
+    return;
+  }
 
-    const r = await target.transferCoins(toUser, amount, pin, sendTag);
+  // ══════════════════════════════════════════════════════════
+  //  VOTE
+  //  |vote <username> [$acc]       → vote for a user
+  //  |vote <username> $aa          → all sub-accounts vote
+  // ══════════════════════════════════════════════════════════
+
+  const voteMatch = cmd.match(/^\|vote\s+(\w+)/i);
+  if (voteMatch) {
+    const voteTarget = voteMatch[1];
+
+    const voters = isAllAccounts
+      ? getAllSubAccounts()
+      : targetAccounts.length > 0 ? targetAccounts : [target];
+
+    if (voters.length === 0) { reply(`❌ No accounts available`); return; }
+
+    if (voters.length === 1) {
+      const r = await voters[0].voteUser(voteTarget);
+      const ok = r.status < 400;
+      const msg = r.data?.message || r.data?.data?.message || JSON.stringify(r.data).slice(0, 80);
+      reply(`${ok ? "✅" : "❌"} @${voters[0].username} voted for @${voteTarget}: ${msg}`);
+    } else {
+      reply(`⏳ Voting for @${voteTarget} from ${voters.length} accounts...`);
+      let ok = 0, fail = 0;
+      for (const acc of voters) {
+        const r = await acc.voteUser(voteTarget);
+        if (r.status < 400) {
+          ok++;
+          const msg = r.data?.message || r.data?.data?.message || "OK";
+          reply(`  ✅ @${acc.username}: ${msg}`);
+        } else {
+          fail++;
+          const msg = r.data?.message || r.data?.data?.message || r.data?.error || JSON.stringify(r.data).slice(0, 60);
+          reply(`  ❌ @${acc.username}: ${msg}`);
+        }
+        await new Promise((res) => setTimeout(res, 300));
+      }
+      reply(`📊 Vote done: ${ok} success, ${fail} failed`);
+    }
+    return;
+  }
+
+  // ══════════════════════════════════════════════════════════
+  //  EMAIL
+  //  |email @<to> #<subject> *<body> [$acc]
+  //  Example: |email @faysal #Hello *How are you? $firefox
+  //
+  //  |inbox [$acc]         → show inbox (page 1)
+  //  |inbox 2 [$acc]       → show inbox page 2
+  // ══════════════════════════════════════════════════════════
+
+  // Send email: |email @username #subject *body
+  const emailMatch = cmd.match(/^\|email\s+@(\w+)\s+#([^*]+)\s*\*(.+)/i);
+  if (emailMatch) {
+    const [, toUser, subject, body] = emailMatch;
+    const emailBody = body.trim();
+    const emailSubject = subject.trim();
+
+    const senders = isAllAccounts
+      ? getAllSubAccounts()
+      : targetAccounts.length > 0 ? targetAccounts : [target];
+
+    if (senders.length === 1) {
+      const r = await senders[0].sendEmail(toUser, emailSubject, emailBody);
+      const ok = r.status < 400;
+      const msg = r.data?.message || r.data?.data?.message || JSON.stringify(r.data).slice(0, 80);
+      reply(`${ok ? "✅" : "❌"} Email from @${senders[0].username} → @${toUser}: ${msg}`);
+    } else {
+      reply(`⏳ Sending email to @${toUser} from ${senders.length} accounts...`);
+      let ok = 0, fail = 0;
+      for (const acc of senders) {
+        const r = await acc.sendEmail(toUser, emailSubject, emailBody);
+        if (r.status < 400) { ok++; reply(`  ✅ @${acc.username}: sent`); }
+        else {
+          fail++;
+          const msg = r.data?.message || r.data?.data?.message || JSON.stringify(r.data).slice(0, 60);
+          reply(`  ❌ @${acc.username}: ${msg}`);
+        }
+        await new Promise((res) => setTimeout(res, 300));
+      }
+      reply(`📊 Email sent: ${ok} success, ${fail} failed`);
+    }
+    return;
+  }
+
+  // Read inbox: |inbox [page] [$acc]
+  const inboxMatch = cmd.match(/^\|inbox(?:\s+(\d+))?/i);
+  if (inboxMatch) {
+    const page = Number(inboxMatch[1] || 1);
+    const r = await target.getInbox("all", page);
+    const emails = r.data?.emails || r.data?.data?.emails || r.data?.data || r.data || [];
+    const list = Array.isArray(emails) ? emails : [];
+    if (!list.length) { reply(`📭 Inbox empty (page ${page}) for @${target.username}`); return; }
+    const lines = list.slice(0, 10).map((e, i) => {
+      const from = e.from_username || e.sender?.username || e.from || "?";
+      const subj = e.subject || "(no subject)";
+      const date = e.created_at ? new Date(e.created_at).toLocaleDateString() : "";
+      return `  ${i + 1}. From:@${from} | ${subj} ${date ? `| ${date}` : ""}`;
+    }).join("\n");
+    reply(`📬 Inbox @${target.username} (page ${page}):\n${lines}`);
+    return;
+  }
+
+  // ══════════════════════════════════════════════════════════
+  //  REGISTRATION & ACTIVATION
+  //  Register:  |reg <username> <email> <password> [gender] [country]
+  //  Syntax:    |reg myuser myuser@email.com mypass123
+  //             |reg myuser myuser@email.com mypass123 female Bangladesh
+  //
+  //  Activate:  |act <activation_code>
+  //  Syntax:    |act 0ADF82
+  //
+  //  After activation, use |lnu username:password to login the new account
+  //
+  //  Daily XP:  |daily [$acc]     → claim daily login XP bonus
+  //             |daily $aa        → all sub-accounts claim
+  // ══════════════════════════════════════════════════════════
+
+  // Register: |reg <username> <email> <password> [gender] [country]
+  const regMatch = cmd.match(/^\|reg\s+(\S+)\s+(\S+)\s+(\S+)(?:\s+(male|female))?(?:\s+(.+))?/i);
+  if (regMatch) {
+    if (!isFullParent) { reply(`❌ Only full parents can register accounts`); return; }
+    const [, regUser, regEmail, regPass, regGender = "male", regCountry = "Bangladesh"] = regMatch;
+
+    reply(`⏳ Registering @${regUser} (${regEmail})...`);
+    const r = await callerAccount.registerAccount(
+      regUser, regEmail, regPass,
+      regGender.toLowerCase(),
+      regCountry.trim()
+    );
+
     const ok = r.status < 400;
+    const msg = r.data?.message || r.data?.data?.message || r.data?.error || JSON.stringify(r.data).slice(0, 120);
 
     if (ok) {
-      // Refresh balance after transfer
-      const acc = await target.getAccount();
-      const newBal = acc.data?.balance_cents ?? acc.data?.data?.balance_cents ?? "?";
       reply(
-        `✅ Transfer successful!\n`+
-        `  From   : @${target.username}\n`+
-        `  To     : @${toUser}\n`+
-        `  Amount : ${amount} coins\n`+
-        `  Balance: ${newBal} cents remaining`
+        `✅ Registered @${regUser}!\n` +
+        `  Email: ${regEmail}\n` +
+        `  Password: ${regPass}\n` +
+        `  ${msg}\n\n` +
+        `📧 Check email for activation code, then use:\n` +
+        `  |act <code>\n` +
+        `Then login with:\n` +
+        `  |lnu ${regUser}:${regPass}`
       );
     } else {
-      const errMsg = r.data?.message || r.data?.error || r.data?.msg || JSON.stringify(r.data).slice(0,120);
-      reply(`❌ Transfer failed!\n  From: @${target.username} → @${toUser}\n  Error: ${errMsg}`);
+      reply(`❌ Registration failed for @${regUser}: ${msg}`);
+    }
+    return;
+  }
+
+  // Activate account: |act <code>
+  const actMatch = cmd.match(/^\|act\s+(\S+)/i);
+  if (actMatch) {
+    if (!isFullParent) { reply(`❌ Only full parents can activate accounts`); return; }
+    const activationCode = actMatch[1].trim();
+
+    reply(`⏳ Activating with code: ${activationCode}...`);
+    const r = await callerAccount.activateAccount(activationCode);
+
+    const ok = r.status < 400;
+    const msg = r.data?.message || r.data?.data?.message || r.data?.error || JSON.stringify(r.data).slice(0, 120);
+    reply(`${ok ? "✅" : "❌"} Activation [${activationCode}]: ${msg}`);
+    return;
+  }
+
+  // Daily XP claim: |daily [$acc or $aa]
+  if (/^\|daily/i.test(cmd)) {
+    const dailyTargets = isAllAccounts
+      ? getAllSubAccounts()
+      : targetAccounts.length > 0 ? targetAccounts : [target];
+
+    if (dailyTargets.length === 1) {
+      const r = await dailyTargets[0].claimDailyLogin();
+      const ok = r.status < 400;
+      const msg = r.data?.message || r.data?.data?.message || r.data?.xp || JSON.stringify(r.data).slice(0, 80);
+      reply(`${ok ? "✅" : "❌"} Daily XP @${dailyTargets[0].username}: ${msg}`);
+    } else {
+      reply(`⏳ Claiming daily XP for ${dailyTargets.length} accounts...`);
+      let ok = 0, fail = 0;
+      for (const acc of dailyTargets) {
+        const r = await acc.claimDailyLogin();
+        if (r.status < 400) {
+          ok++;
+          const msg = r.data?.message || r.data?.data?.message || "OK";
+          reply(`  ✅ @${acc.username}: ${msg}`);
+        } else {
+          fail++;
+          const msg = r.data?.message || r.data?.data?.message || JSON.stringify(r.data).slice(0, 60);
+          reply(`  ❌ @${acc.username}: ${msg}`);
+        }
+        await new Promise((res) => setTimeout(res, 300));
+      }
+      reply(`📊 Daily XP: ${ok} claimed, ${fail} failed`);
     }
     return;
   }
@@ -935,162 +1550,321 @@ async function handleCommand(content, senderName, callerAccount, source, sourceR
   // ══════════════════════════════════════════════════════════
   //  FEATURE TOGGLES
   // ══════════════════════════════════════════════════════════
-  if (/^\|vp\s+on/i.test(cmd))  { target.voucherOn=true;  reply(`✅ Voucher ON @${target.username}`);  return; }
-  if (/^\|vp\s+off/i.test(cmd)) { target.voucherOn=false; reply(`⛔ Voucher OFF @${target.username}`); return; }
 
-  const awOnM = cmd.match(/^\|aw\s+on(?:\s+(\d+))?/i);
-  if (awOnM) {
-    if (awOnM[1]) { target.awRooms.add(Number(awOnM[1])); target.awOn=true; reply(`✅ AW ON room ${awOnM[1]} @${target.username}`); }
-    else { target.awOn=true; target.awRooms.clear(); reply(`✅ AW ON all rooms @${target.username}`); }
-    return;
-  }
+  if (/^\|vp\s+on/i.test(cmd)) { target.voucherOn = true; reply(`✅ Voucher ON for @${target.username} 🎁`); return; }
+  if (/^\|vp\s+off/i.test(cmd)) { target.voucherOn = false; reply(`⛔ Voucher OFF for @${target.username}`); return; }
 
-  const awOffM = cmd.match(/^\|aw\s+off(?:\s+(\d+))?/i);
-  if (awOffM) {
-    if (awOffM[1]) { target.awRooms.delete(Number(awOffM[1])); if(!target.awRooms.size) target.awOn=false; reply(`⛔ AW OFF room ${awOffM[1]}`); }
-    else { target.awOn=false; target.awRooms.clear(); reply(`⛔ AW OFF @${target.username}`); }
-    return;
-  }
-
-  const awMsgM = cmd.match(/^\|aw_msg\s+(?:#(\d+)\s+)?(.+)/i);
-  if (awMsgM) {
-    if (awMsgM[1]) { target.awMessages.set(Number(awMsgM[1]),awMsgM[2]); reply(`✅ AW msg room ${awMsgM[1]}: "${awMsgM[2]}"`); }
-    else { target.awTemplate=awMsgM[2]; reply(`✅ AW default: "${awMsgM[2]}"`); }
-    return;
-  }
-
-  if (/^\|ar\s+on/i.test(cmd))  { target.autoReplyOn=true;  reply(`✅ Auto-reply ON @${target.username}`);  return; }
-  if (/^\|ar\s+off/i.test(cmd)) { target.autoReplyOn=false; reply(`⛔ Auto-reply OFF @${target.username}`); return; }
-
-  // ══════════════════════════════════════════════════════════
-  //  AUTO-TEXT
-  // ══════════════════════════════════════════════════════════
-  const atOnM = cmd.match(/^\|at\s+on(?:\s+(\d+))?/i);
-  if (atOnM) {
-    if (!atOnM[1]) { reply("❌ Specify room: |at on <room_id>"); return; }
-    if (!target.autoTextMessages.length) target.autoTextMessages = loadLines("at.txt");
-    if (!target.autoTextMessages.length) { reply("❌ at.txt is empty"); return; }
-    target.autoTextRooms.add(Number(atOnM[1])); target.autoTextOn=true;
-    if (target.isConnected) { target.stopAutoText(); target.startAutoText(); }
-    reply(`✅ AT ON room ${atOnM[1]} @${target.username} (${target.autoTextMessages.length} msgs, ${target.autoTextInterval}m)`); return;
-  }
-
-  const atOffM = cmd.match(/^\|at\s+off(?:\s+(\d+))?/i);
-  if (atOffM) {
-    if (atOffM[1]) {
-      target.autoTextRooms.delete(Number(atOffM[1]));
-      if (!target.autoTextRooms.size) { target.autoTextOn=false; target.stopAutoText(); }
-      reply(`⛔ AT OFF room ${atOffM[1]} @${target.username}`);
+  const awOnMatch = cmd.match(/^\|aw\s+on(?:\s+(\d+))?/i);
+  if (awOnMatch) {
+    const roomId = awOnMatch[1];
+    if (roomId) {
+      target.awRooms.add(Number(roomId));
+      target.awOn = true;
+      reply(`✅ @${target.username} → Auto-welcome ON for room ${roomId}`);
     } else {
-      target.autoTextOn=false; target.autoTextRooms.clear(); target.stopAutoText();
-      reply(`⛔ AT OFF @${target.username}`);
+      target.awOn = true;
+      target.awRooms.clear();
+      reply(`✅ @${target.username} → Auto-welcome ON (all rooms) 👋`);
     }
     return;
   }
 
-  const atIntM = cmd.match(/^\|at\s+interval\s+(\d+)/i);
-  if (atIntM) {
-    const m=Number(atIntM[1]); if(m<1){reply("❌ Min 1 minute");return;}
-    target.setAutoTextInterval(m); reply(`✅ AT interval ${m}m @${target.username}`); return;
+  const awOffMatch = cmd.match(/^\|aw\s+off(?:\s+(\d+))?/i);
+  if (awOffMatch) {
+    const roomId = awOffMatch[1];
+    if (roomId) {
+      target.awRooms.delete(Number(roomId));
+      if (target.awRooms.size === 0) target.awOn = false;
+      reply(`⛔ @${target.username} → Auto-welcome OFF for room ${roomId}`);
+    } else {
+      target.awOn = false;
+      target.awRooms.clear();
+      reply(`⛔ @${target.username} → Auto-welcome OFF`);
+    }
+    return;
+  }
+
+  const awMsgMatch = cmd.match(/^\|aw_msg\s+(?:#(\d+)\s+)?(.+)/i);
+  if (awMsgMatch) {
+    const roomId = awMsgMatch[1];
+    const message = awMsgMatch[2].trim();
+    if (roomId) {
+      target.awMessages.set(Number(roomId), message);
+      reply(`✅ @${target.username} → Welcome message for room ${roomId}:\n"${message}"`);
+    } else {
+      target.awTemplate = message;
+      reply(`✅ @${target.username} → Default welcome:\n"${message}"`);
+    }
+    return;
+  }
+
+  if (/^\|ar\s+on/i.test(cmd)) { target.autoReplyOn = true; reply(`✅ Auto-reply ON for @${target.username} 💬`); return; }
+  if (/^\|ar\s+off/i.test(cmd)) { target.autoReplyOn = false; reply(`⛔ Auto-reply OFF for @${target.username}`); return; }
+
+  // ══════════════════════════════════════════════════════════
+  //  AUTO-TEXT SYSTEM
+  // ══════════════════════════════════════════════════════════
+
+  const atOnMatch = cmd.match(/^\|at\s+on(?:\s+(\d+))?/i);
+  if (atOnMatch) {
+    const roomId = atOnMatch[1];
+    if (!target.autoTextMessages.length) target.autoTextMessages = loadAutoTexts();
+    if (!target.autoTextMessages.length) { reply(`❌ No messages in at.txt`); return; }
+    if (!roomId) { reply(`❌ Specify room: |at on <room_id>`); return; }
+    target.autoTextRooms.add(Number(roomId));
+    target.autoTextOn = true;
+    if (target.isConnected) { target.stopAutoText(); target.startAutoText(); }
+    reply(`✅ @${target.username} → Auto-text ON for room ${roomId}\n${target.autoTextMessages.length} messages, interval: ${target.autoTextInterval}m`);
+    return;
+  }
+
+  const atOffMatch = cmd.match(/^\|at\s+off(?:\s+(\d+))?/i);
+  if (atOffMatch) {
+    const roomId = atOffMatch[1];
+    if (roomId) {
+      target.autoTextRooms.delete(Number(roomId));
+      if (target.autoTextRooms.size === 0) { target.autoTextOn = false; target.stopAutoText(); }
+      reply(`⛔ @${target.username} → Auto-text OFF for room ${roomId}`);
+    } else {
+      target.autoTextOn = false;
+      target.autoTextRooms.clear();
+      target.stopAutoText();
+      reply(`⛔ @${target.username} → Auto-text OFF`);
+    }
+    return;
+  }
+
+  const atIntervalMatch = cmd.match(/^\|at\s+interval\s+(\d+)/i);
+  if (atIntervalMatch) {
+    const minutes = Number(atIntervalMatch[1]);
+    if (minutes < 1) { reply(`❌ Interval must be ≥1 minute`); return; }
+    target.setAutoTextInterval(minutes);
+    reply(`✅ @${target.username} → Auto-text interval: ${minutes}m`);
+    return;
   }
 
   if (/^\|at\s+reload/i.test(cmd)) {
-    target.autoTextMessages=loadLines("at.txt"); target.autoTextIndex.clear();
-    if (target.autoTextOn) { target.stopAutoText(); target.startAutoText(); }
-    reply(`✅ Reloaded ${target.autoTextMessages.length} msgs from at.txt`); return;
+    target.autoTextMessages = loadAutoTexts();
+    target.autoTextIndex.clear();
+    if (target.autoTextOn && target.isConnected) { target.stopAutoText(); target.startAutoText(); }
+    reply(`✅ Reloaded ${target.autoTextMessages.length} messages from at.txt`);
+    return;
   }
 
   if (/^\|at\s+status/i.test(cmd)) {
-    if (!target.autoTextOn) { reply(`📝 AT OFF @${target.username}`); return; }
-    const lines=[`📝 AT @${target.username}:`,`  Msgs:${target.autoTextMessages.length}`,`  Int:${target.autoTextInterval}m`,`  Rooms:${[...target.autoTextRooms].join(",")}`];
-    for (const r of target.autoTextRooms) lines.push(`  Room ${r}: ${(target.autoTextIndex.get(r)||0)+1}/${target.autoTextMessages.length}`);
-    reply(lines.join("\n")); return;
+    if (!target.autoTextOn) { reply(`📝 Auto-text OFF for @${target.username}`); return; }
+    const lines = [
+      `📝 Auto-text @${target.username}:`,
+      `  Messages: ${target.autoTextMessages.length}`,
+      `  Interval: ${target.autoTextInterval}m`,
+      `  Rooms: ${[...target.autoTextRooms].join(", ")}`,
+    ];
+    for (const rid of target.autoTextRooms) {
+      const curr = target.autoTextIndex.get(rid) || 0;
+      lines.push(`  Room ${rid}: ${curr + 1}/${target.autoTextMessages.length}`);
+    }
+    reply(lines.join("\n"));
+    return;
   }
 
   // ══════════════════════════════════════════════════════════
-  //  PARENT MANAGEMENT (full parent only)
+  //  PARENT MANAGEMENT (full parents only — already guarded above)
   // ══════════════════════════════════════════════════════════
-  const aspM=cmd.match(/^\|asp\s+(\w+)/i); if(aspM&&isFullParent){SUB_PARENT_USERS.add(aspM[1].toLowerCase());reply(`✅ @${aspM[1]} added as sub-parent`);return;}
-  const rspM=cmd.match(/^\|rsp\s+(\w+)/i); if(rspM&&isFullParent){SUB_PARENT_USERS.delete(rspM[1].toLowerCase());reply(`✅ @${rspM[1]} removed from sub-parents`);return;}
-  const apM =cmd.match(/^\|ap\s+(\w+)/i);  if(apM&&isFullParent){PARENT_USERS.add(apM[1].toLowerCase());reply(`✅ @${apM[1]} added as parent`);return;}
-  const rpM =cmd.match(/^\|rp\s+(\w+)/i);  if(rpM&&isFullParent){PARENT_USERS.delete(rpM[1].toLowerCase());reply(`✅ @${rpM[1]} removed from parents`);return;}
+
+  const addSubParentMatch = cmd.match(/^\|asp\s+(\w+)/i);
+  if (addSubParentMatch && isFullParent) {
+    SUB_PARENT_USERS.add(addSubParentMatch[1].toLowerCase());
+    reply(`✅ @${addSubParentMatch[1]} added as sub-parent`);
+    return;
+  }
+
+  const remSubParentMatch = cmd.match(/^\|rsp\s+(\w+)/i);
+  if (remSubParentMatch && isFullParent) {
+    SUB_PARENT_USERS.delete(remSubParentMatch[1].toLowerCase());
+    reply(`✅ @${remSubParentMatch[1]} removed from sub-parents`);
+    return;
+  }
+
+  const addPMatch = cmd.match(/^\|ap\s+(\w+)/i);
+  if (addPMatch && isFullParent) {
+    PARENT_USERS.add(addPMatch[1].toLowerCase());
+    reply(`✅ @${addPMatch[1]} added as parent`);
+    return;
+  }
+
+  const remPMatch = cmd.match(/^\|rp\s+(\w+)/i);
+  if (remPMatch && isFullParent) {
+    PARENT_USERS.delete(remPMatch[1].toLowerCase());
+    reply(`✅ @${remPMatch[1]} removed from parents`);
+    return;
+  }
 
   // ══════════════════════════════════════════════════════════
   //  STATUS & HELP
   // ══════════════════════════════════════════════════════════
+
   if (/^\|status/i.test(cmd)) {
-    const motherAcc = accounts.get((USERNAME||"").toLowerCase());
-    const motherBlock = motherAcc ? motherAcc.statusText() : `👑 @${USERNAME} (not in accounts)`;
-    const subBlocks = [...accounts.values()].filter(a=>!isMother(a.username)).map(a=>a.statusText()).join("\n\n");
-    reply(
-      `📊 Bot Status\n`+
-      `Mother     : @${USERNAME}\n`+
-      `Parents    : [${[...PARENT_USERS].join(", ")}]\n`+
-      `Sub-Parents: [${[...SUB_PARENT_USERS].join(", ")||"none"}]\n\n`+
-      motherBlock + (subBlocks ? "\n\n"+subBlocks : "")
-    );
+    const motherAcc = accounts.get((USERNAME || "").toLowerCase());
+    const parents = [...PARENT_USERS].join(", ");
+    const subParents = [...SUB_PARENT_USERS].join(", ") || "none";
+    const motherStatus = motherAcc ? motherAcc.statusText() : `👑 @${USERNAME} (not found)`;
+    const subStatus = [...accounts.values()]
+      .filter((a) => !isMother(a.username))
+      .map((a) => a.statusText())
+      .join("\n\n");
+
+    let statusMsg = `📊 Bot Status\n`;
+    statusMsg += `Mother : @${USERNAME}\n`;
+    statusMsg += `Parents: [${parents}]\n`;
+    statusMsg += `Sub-Parents: [${subParents}]\n\n`;
+    statusMsg += `${motherStatus}`;
+    if (subStatus) statusMsg += `\n\n${subStatus}`;
+    reply(statusMsg);
     return;
   }
 
   if (/^\|help/i.test(cmd)) {
-    let h = `📖 Bot Commands\n`;
-    h += `  $aa = all sub-accs (skips mother/parent/sub-parent)\n`;
-    h += `  $name = specific account\n\n`;
-    h += `👥 Accounts (parent only):\n  |lnu user:pass\n  |lnu u1:p1;u2:p2\n  |ltu user\n  |accounts\n\n`;
-    h += `🏠 Rooms:\n  |jr <id> $aa / $acc\n  |lr <id> $aa / $acc\n  |lr all $acc\n  |tr <id> <msg> $acc\n  |addroom Name=ID\n  |removeroom Name\n  |listroom\n\n`;
-    h += `🌊 Flood:\n  |flood <id> <text> $aa / $acc\n  |autoflood <id> $aa / $acc\n  |flood stop $aa / $acc\n  |flood reload\n\n`;
-    h += `📝 Auto-Text (at.txt):\n  |at on <id> $acc\n  |at off [id] $acc\n  |at interval <min>\n  |at reload\n  |at status\n\n`;
-    h += `👋 Auto-welcome:\n  |aw on [id] $acc\n  |aw off [id] $acc\n  |aw_msg <text>  (use {username})\n  |aw_msg #<id> <text>\n\n`;
-    h += `💬 Auto-reply: |ar on/off $acc\n`;
-    h += `🎁 Voucher: |vp on/off $acc\n`;
-    h += `👫 Friends & Coins:\n`
-    h += `  |sf <user> $acc       → send friend request\n`
-    h += `  |af <id> $acc         → accept by request ID\n`
-    h += `  |afa $acc             → accept ALL pending requests\n`
-    h += `  |fr $acc              → list pending requests\n`
-    h += `  |fl $acc              → list friends\n`
-    h += `  |balance $acc         → check balance\n`
-    h += `  |pin $acc             → check if PIN is set\n`
-    h += `  |send <to> <amt> <pin> $acc  → transfer coins\n`
-    h += `  |send <to> <amt> <pin> tag $acc  → transfer + announce\n\n`;
-    if (isFullParent) h += `⚙️ Parent only:\n  |ap/rp <user>  |asp/rsp <user>\n\n`;
-    h += `🔒 Access: Parents=PM+Room  Sub-parents=PM only  $aa=parents only\n`;
-    h += `🤖 AI: /a <question> (PM or room)`;
-    reply(h); return;
+    let helpText = `📖 Commands\n`;
+    helpText += `  $aa = all sub-accounts (not mother)\n`;
+    helpText += `  $name = specific account\n\n`;
+
+    helpText += `👥 Accounts (parent only):\n`;
+    helpText += `  |lnu user:pass\n`;
+    helpText += `  |lnu u1:p1;u2:p2  (multi)\n`;
+    helpText += `  |ltu user\n`;
+    helpText += `  |accounts\n\n`;
+
+    helpText += `🏠 Rooms:\n`;
+    helpText += `  |jr <id> $aa         → all sub-accs join\n`;
+    helpText += `  |jr <id> $acc        → specific acc joins\n`;
+    helpText += `  |lr <id> $aa         → all sub-accs leave\n`;
+    helpText += `  |lr all $acc\n`;
+    helpText += `  |tr <id> <msg> $acc\n`;
+    helpText += `  |addroom Name=ID\n`;
+    helpText += `  |removeroom Name\n`;
+    helpText += `  |listroom\n\n`;
+
+    helpText += `🌊 Flood:\n`;
+    helpText += `  |flood <room> <text> $aa\n`;
+    helpText += `  |flood <room> <text> $acc\n`;
+    helpText += `  |autoflood <room> $aa\n`;
+    helpText += `  |autoflood <room> $acc\n`;
+    helpText += `  |flood stop $aa\n`;
+    helpText += `  |flood stop $acc\n`;
+    helpText += `  |flood reload\n\n`;
+
+    helpText += `📝 Auto-Text (at.txt):\n`;
+    helpText += `  |at on <room_id> $acc\n`;
+    helpText += `  |at off [room_id] $acc\n`;
+    helpText += `  |at interval <min> $acc\n`;
+    helpText += `  |at reload $acc\n`;
+    helpText += `  |at status $acc\n\n`;
+
+    helpText += `👋 Auto-welcome:\n`;
+    helpText += `  |aw on [room_id] $acc\n`;
+    helpText += `  |aw off [room_id] $acc\n`;
+    helpText += `  |aw_msg <text>  (use {username})\n`;
+    helpText += `  |aw_msg #<room_id> <text>\n\n`;
+
+    helpText += `💬 Auto-reply:\n`;
+    helpText += `  |ar on/off $acc\n\n`;
+
+    helpText += `🎁 Voucher:\n`;
+    helpText += `  |vp on/off $acc\n\n`;
+
+    helpText += `👫 Friends:\n`;
+    helpText += `  |sf <user> [$acc]     → send friend request\n`;
+    helpText += `  |af <id> [$acc]       → accept by request ID\n`;
+    helpText += `  |aaf [$acc]           → accept ALL pending\n`;
+    helpText += `  |fr [$acc]            → list pending requests\n`;
+    helpText += `  |fl [$acc]            → list friends\n`;
+    helpText += `  |balance [$acc]       → show balance\n`;
+    helpText += `  |pincheck [$acc]      → check if PIN is set\n\n`;
+
+    helpText += `💸 Coin Transfer:\n`;
+    helpText += `  |send <to> <amt> <pin> [$acc]   → single acc send\n`;
+    helpText += `  |send <to> <amt> <pin> $aa      → all sub-accs send\n`;
+    helpText += `  |collect <to> <amt> <pin>        → all sub-accs → one dest\n\n`;
+
+    helpText += `🗳️ Vote:\n`;
+    helpText += `  |vote <username> [$acc]          → vote for a user\n`;
+    helpText += `  |vote <username> $aa             → all sub-accs vote\n\n`;
+
+    helpText += `📧 Email:\n`;
+    helpText += `  |email @<to> #<subject> *<body> [$acc]\n`;
+    helpText += `  Example: |email @faysal #Hi *Hello there $firefox\n`;
+    helpText += `  |inbox [page] [$acc]             → read inbox\n\n`;
+
+    if (isFullParent) {
+      helpText += `📝 Registration (parent only):\n`;
+      helpText += `  |reg <user> <email> <pass> [gender] [country]\n`;
+      helpText += `  Example: |reg myuser me@email.com pass123\n`;
+      helpText += `  Example: |reg myuser me@email.com pass123 female India\n`;
+      helpText += `  |act <code>                    → activate with email code\n\n`;
+
+      helpText += `⚙️ Parent Only:\n`;
+      helpText += `  |ap <user>  |rp <user>\n`;
+      helpText += `  |asp <user>  |rsp <user>\n\n`;
+    }
+
+    helpText += `🎯 Daily XP:\n`;
+    helpText += `  |daily [$acc or $aa]             → claim daily login bonus\n\n`;
+
+    helpText += `📊 Info:\n`;
+    helpText += `  |status  |help\n\n`;
+
+    helpText += `🔒 Access:\n`;
+    helpText += `  Parents     → PM + Room commands\n`;
+    helpText += `  Sub-parents → PM only\n`;
+    helpText += `  $aa         → parents only, skips mother\n\n`;
+
+    helpText += `🤖 AI: /a <question>  (PM or room)`;
+    reply(helpText);
+    return;
   }
 
-  reply(`❓ Unknown command. Send "|help"`);
+  reply(`❓ Unknown command. Send "|help" for the full list.`);
 }
 
 // ══════════════════════════════════════════════════════════════
 //  MAIN
 // ══════════════════════════════════════════════════════════════
 async function main() {
-  if (!USERNAME)          { console.error("❌ MIG66_USERNAME missing");             process.exit(1); }
-  if (!TOKEN && !PASSWORD){ console.error("❌ MIG66_TOKEN or MIG66_PASSWORD needed");process.exit(1); }
-  if (AI_PROVIDER==="mistral" && !process.env.MISTRAL_API_KEY)
-                          { console.error("❌ MISTRAL_API_KEY missing");             process.exit(1); }
+  if (!USERNAME) { console.error("❌ MIG66_USERNAME missing"); process.exit(1); }
+  if (!TOKEN && !PASSWORD) { console.error("❌ MIG66_TOKEN or MIG66_PASSWORD missing"); process.exit(1); }
+
+  // BUG FIX: MISTRAL_API_KEY missing is now a WARNING only, not a fatal error.
+  // The bot can still run without AI — commands still work.
+  if (AI_PROVIDER === "mistral" && !process.env.MISTRAL_API_KEY) {
+    console.warn("⚠️  MISTRAL_API_KEY not set — AI replies will be disabled. Bot will still run.");
+  }
 
   console.log("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
-  console.log("  mig66 AI Bot  ✅ Full Edition v4.1");
+  console.log("  mig66 AI Bot  ✅ Full Edition v4.3");
   console.log(`  Mother      : ${USERNAME}`);
   console.log(`  Room        : ${ROOM_ID}`);
   console.log(`  Trigger     : ${TRIGGER}`);
   console.log(`  AI          : ${AI_PROVIDER}`);
   console.log(`  Parents     : ${[...PARENT_USERS].join(", ")}`);
-  console.log(`  Sub-Parents : ${[...SUB_PARENT_USERS].join(", ")||"none"}`);
+  console.log(`  Sub-Parents : ${[...SUB_PARENT_USERS].join(", ") || "none"}`);
   console.log("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n");
 
-  const main = new BotAccount({ username:USERNAME, password:PASSWORD, token:TOKEN||null, isMain:true });
-  const ok   = await main.login();
+  const mainAccount = new BotAccount({
+    username: USERNAME,
+    password: PASSWORD,
+    token: TOKEN || null,
+    isMain: true,
+  });
+
+  const ok = await mainAccount.login();
   if (!ok) process.exit(1);
 
-  accounts.set(USERNAME.toLowerCase(), main);
-  main.connect(ROOM_ID);
+  accounts.set(USERNAME.toLowerCase(), mainAccount);
+  mainAccount.connect(ROOM_ID);
 
   process.on("SIGINT", () => {
     console.log("\n[*] Shutting down...");
-    for (const a of accounts.values()) a.disconnect();
+    for (const acc of accounts.values()) acc.disconnect();
     process.exit(0);
   });
 }
