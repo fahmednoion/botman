@@ -77,13 +77,15 @@ const ROOM_LIST = new Map([
   ["Nepal", 3],
   ["Philippine", 4],
   ["Indonesia", 5],
-  ["Savages", 46],
+  ["Savages", 21],
   ["Bangladeshi", 20],
   ["Kolkata", 238],
   ["Faysal", 228],
   ["Buy Sell", 288],
   ["Coin Bazar", 305],
   ["Coins Sell group", 306],
+  ["BOT PARK", 334],
+  ["Chatgpt", 335],
 ]);
 
 function addRoom(name, roomId) {
@@ -235,6 +237,7 @@ class BotAccount {
     this.balance = null;
     this.isConnected = false;
     this.reconnTimer = null;
+    this.tokenRefreshTimer = null;  // proactive token refresh
     this.processed = new Set();
     this.startTime = Date.now();
   }
@@ -251,6 +254,7 @@ class BotAccount {
         this.userId = String(p.id || "");
         const exp = new Date(p.exp * 1000).toLocaleString();
         this.log(`✓ Token valid — user: ${p.username}, ID: ${this.userId}, expires: ${exp}`);
+        this.scheduleTokenRefresh();
         return true;
       } catch (e) {
         this.log(`! Token decode error: ${e.message}`);
@@ -304,6 +308,12 @@ class BotAccount {
         TOKEN = this.token;
       }
 
+      // For sub-accounts: also save token so it survives restarts
+      if (!this.isMain && this.token) {
+        this.log(`💾 Token saved in memory for auto-refresh`);
+      }
+
+      this.scheduleTokenRefresh();
       return true;
     } catch (e) {
       this.log(`❌ Login error: ${e.message}`);
@@ -319,6 +329,80 @@ class BotAccount {
     } catch {
       return false;
     }
+  }
+
+  // Returns ms until token expires (negative = already expired)
+  getTokenExpiry() {
+    if (!this.token) return -1;
+    try {
+      const p = JSON.parse(Buffer.from(this.token.split(".")[1], "base64").toString());
+      return p.exp * 1000 - Date.now();
+    } catch { return -1; }
+  }
+
+  // ── Proactive token refresh ───────────────────────────────
+  // Called after every successful login/connect.
+  // Schedules a re-login 60 minutes before the token expires.
+  // On success: saves new token to .env and re-authenticates socket.
+  scheduleTokenRefresh() {
+    if (this.tokenRefreshTimer) {
+      clearTimeout(this.tokenRefreshTimer);
+      this.tokenRefreshTimer = null;
+    }
+
+    const msUntilExpiry = this.getTokenExpiry();
+    if (msUntilExpiry < 0) {
+      // Already expired — refresh immediately
+      this.log("⚠️  Token already expired, refreshing now...");
+      this.refreshToken();
+      return;
+    }
+
+    // Refresh 60 minutes before expiry (but at least 30 seconds from now)
+    const refreshIn = Math.max(msUntilExpiry - 60 * 60 * 1000, 30000);
+    const refreshInMin = Math.round(refreshIn / 60000);
+    const expiryDate = new Date(Date.now() + msUntilExpiry).toLocaleString();
+
+    this.log(`🔑 Token expires: ${expiryDate} — auto-refresh in ${refreshInMin}m`);
+
+    this.tokenRefreshTimer = setTimeout(() => this.refreshToken(), refreshIn);
+  }
+
+  async refreshToken() {
+    if (!this.password) {
+      this.log("⚠️  Cannot auto-refresh: no password stored. Use |setpass to set one.");
+      return;
+    }
+
+    this.log("🔄 Auto-refreshing token...");
+    const oldToken = this.token;
+
+    // Force re-login by clearing token
+    this.token = null;
+    const ok = await this.login();
+
+    if (!ok) {
+      this.log("❌ Token refresh failed — restoring old token and retrying in 10m");
+      this.token = oldToken;
+      this.tokenRefreshTimer = setTimeout(() => this.refreshToken(), 10 * 60 * 1000);
+      return;
+    }
+
+    this.log(`✅ Token refreshed successfully`);
+
+    // Re-authenticate the live socket with the new token without full reconnect
+    if (this.socket?.connected) {
+      this.log("🔌 Re-authenticating live socket with new token...");
+      // Send auth update event — socket.io supports this natively
+      this.socket.auth = { token: this.token };
+      // The socket stays connected; new API calls will use the new token automatically
+    } else if (this.isConnected === false) {
+      // Socket was already down — let reconnect logic handle it
+      this.log("ℹ️  Socket offline; new token ready for next reconnect");
+    }
+
+    // Schedule the next refresh for the new token
+    this.scheduleTokenRefresh();
   }
 
   async api(method, apiPath, body) {
@@ -843,6 +927,7 @@ class BotAccount {
 
   disconnect() {
     if (this.reconnTimer) clearTimeout(this.reconnTimer);
+    if (this.tokenRefreshTimer) { clearTimeout(this.tokenRefreshTimer); this.tokenRefreshTimer = null; }
     this.stopAutoText();
     this.stopFlood();
     if (this.socket) this.socket.disconnect();
@@ -1006,6 +1091,56 @@ async function handleCommand(content, senderName, callerAccount, source, sourceR
     acc.disconnect();
     accounts.delete(uname);
     reply(`✅ @${uname} logged out`);
+    return;
+  }
+
+  // Set/update password for an account (needed for auto-refresh)
+  // |setpass <password> [$acc]
+  const setPassMatch = cmd.match(/^\|setpass\s+(\S+)/i);
+  if (setPassMatch) {
+    if (!isFullParent) { reply(`❌ Only full parents can use |setpass`); return; }
+    const newPass = setPassMatch[1];
+    target.password = newPass;
+    reply(`✅ Password updated for @${target.username}\n  Auto-refresh will use this password next cycle.`);
+    return;
+  }
+
+  // Show token info: |tokeninfo [$acc]
+  if (/^\|tokeninfo/i.test(cmd)) {
+    const msLeft = target.getTokenExpiry();
+    if (msLeft < 0) {
+      reply(`🔑 @${target.username}: Token EXPIRED`);
+      return;
+    }
+    const hoursLeft = Math.floor(msLeft / 3600000);
+    const minutesLeft = Math.floor((msLeft % 3600000) / 60000);
+    const expiryDate = new Date(Date.now() + msLeft).toLocaleString();
+    const hasPass = target.password ? "✅ stored" : "❌ not stored (use |setpass)";
+    const refreshIn = Math.max(msLeft - 60 * 60 * 1000, 0);
+    const refreshMin = Math.round(refreshIn / 60000);
+    reply(
+      `🔑 Token info — @${target.username}\n` +
+      `  Expires in : ${hoursLeft}h ${minutesLeft}m\n` +
+      `  Expires at : ${expiryDate}\n` +
+      `  Auto-refresh in: ${refreshMin}m\n` +
+      `  Password   : ${hasPass}`
+    );
+    return;
+  }
+
+  // Manually trigger token refresh now: |refresh [$acc]
+  if (/^\|refresh/i.test(cmd)) {
+    if (!isFullParent) { reply(`❌ Only full parents can force a token refresh`); return; }
+    if (!target.password) {
+      reply(`❌ @${target.username} has no password stored. Use |setpass <password> first.`);
+      return;
+    }
+    reply(`⏳ Forcing token refresh for @${target.username}...`);
+    await target.refreshToken();
+    const msLeft = target.getTokenExpiry();
+    const hoursLeft = Math.floor(msLeft / 3600000);
+    const minutesLeft = Math.floor((msLeft % 3600000) / 60000);
+    reply(`✅ @${target.username} token refreshed — expires in ${hoursLeft}h ${minutesLeft}m`);
     return;
   }
 
@@ -1734,6 +1869,12 @@ async function handleCommand(content, senderName, callerAccount, source, sourceR
     helpText += `  |ltu user\n`;
     helpText += `  |accounts\n\n`;
 
+    helpText += `🔑 Token / Session:\n`;
+    helpText += `  |tokeninfo [$acc]    → expiry time + refresh schedule\n`;
+    helpText += `  |refresh [$acc]      → force token refresh now\n`;
+    helpText += `  |setpass <pwd> [$acc]→ store password for auto-refresh\n`;
+    helpText += `  (tokens auto-refresh 1h before expiry if password stored)\n\n`;
+
     helpText += `🏠 Rooms:\n`;
     helpText += `  |jr <id> $aa         → all sub-accs join\n`;
     helpText += `  |jr <id> $acc        → specific acc joins\n`;
@@ -1840,7 +1981,7 @@ async function main() {
   }
 
   console.log("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
-  console.log("  mig66 AI Bot  ✅ Full Edition v4.3");
+  console.log("  mig66 AI Bot  ✅ Full Edition v4.4");
   console.log(`  Mother      : ${USERNAME}`);
   console.log(`  Room        : ${ROOM_ID}`);
   console.log(`  Trigger     : ${TRIGGER}`);
