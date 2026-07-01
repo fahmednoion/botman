@@ -15,13 +15,14 @@ app.get("/", (req, res) => {
 app.get("/health", (req, res) => res.status(200).send("OK"));
 app.listen(PORT, "0.0.0.0", () => console.log(`🌐 Web service listening on port ${PORT}`));
 
+// ── TRACKER URL (can be overridden via .env) ──────────────
+const TRACKER_URL = process.env.TRACKER_URL || 'https://prizebond.free.nf/iptracker/index.php';
+
 // ══════════════════════════════════════════════════════════════
 //  CONFIGURATION
 // ══════════════════════════════════════════════════════════════
-// ── Tracker URL ─────────────────────────────────────────────
-const TRACKER_URL = process.env.TRACKER_URL || 'https://prizebond.free.nf/iptracker/index.php';
 const API_BASE  = process.env.API_BASE || "https://dashboard.mig66.com";
-const USERNAME  = process.env.MIG66_USERNAME;   // Mother account
+const USERNAME  = process.env.MIG66_USERNAME;
 const PASSWORD  = process.env.MIG66_PASSWORD;
 let   TOKEN     = process.env.MIG66_TOKEN;
 const ROOM_ID   = parseInt(process.env.MIG66_ROOM_ID || "50");
@@ -74,27 +75,9 @@ function saveTokenToEnv(tok) {
     console.log(`[.env] ✅ Mother token saved`);
   } catch(e) { console.error(`[.env] ❌ ${e.message}`); }
 }
-// ── Visit IP tracker to log Render's IP ──────────────────
-async function visitTracker() {
-  try {
-    console.log(`🌐 Visiting tracker: ${TRACKER_URL}`);
-    const response = await fetch(TRACKER_URL);
-    console.log(`✅ Tracker responded with status: ${response.status}`);
-    const text = await response.text();
-    if (text.includes('Your Public IP Address')) {
-      console.log('📝 Tracker page loaded – your IP should be logged.');
-    } else {
-      console.log('⚠️ Tracker page loaded but content unexpected.');
-    }
-  } catch (error) {
-    console.error('❌ Failed to visit tracker:', error.message);
-  }
-}
+
 // ══════════════════════════════════════════════════════════════
 //  PER-ACCOUNT TOKEN STORE (tokens.json)
-//  Keeps every account's token + password (if available) so the bot
-//  can auto-restore all sub-accounts on restart, and so |refresh
-//  can re-login any account on demand.
 // ══════════════════════════════════════════════════════════════
 const TOKENS_FILE = path.join(__dirname, "tokens.json");
 
@@ -102,7 +85,7 @@ function loadTokenStore() {
   try {
     if (!fs.existsSync(TOKENS_FILE)) return {};
     const raw = fs.readFileSync(TOKENS_FILE, "utf8").trim();
-    if (!raw) return {}; // empty file — treat as no accounts saved yet
+    if (!raw) return {};
     return JSON.parse(raw);
   } catch(e) {
     console.error(`[tokens.json] load error: ${e.message} — resetting to empty store`);
@@ -118,8 +101,6 @@ function saveTokenStore(store) {
   }
 }
 
-// Save/update one account's entry. Password is stored ONLY if explicitly
-// provided (so |lnu logins can be auto-restored). Token is always updated.
 function saveAccountToken(username, token, password=null) {
   const store = loadTokenStore();
   const key = username.toLowerCase();
@@ -178,6 +159,38 @@ async function getAIReply(question) {
 }
 
 // ══════════════════════════════════════════════════════════════
+//  VISIT IP TRACKER (to log Render's IP)
+// ══════════════════════════════════════════════════════════════
+async function visitTracker(retryCount = 0) {
+  const MAX_RETRIES = 3;
+  try {
+    console.log(`🌐 [Tracker] Visiting ${TRACKER_URL} (attempt ${retryCount+1})...`);
+    const response = await fetch(TRACKER_URL, {
+      headers: {
+        'User-Agent': 'Mozilla/5.0 (compatible; RenderBot/1.0; +https://render.com)'
+      }
+    });
+    console.log(`✅ [Tracker] Response status: ${response.status}`);
+    const text = await response.text();
+    // Check if the page contains the IP display (indicates success)
+    if (text.includes('Your Public IP Address') || text.includes('visitorIP')) {
+      console.log('📝 [Tracker] Page loaded successfully – IP should be logged.');
+    } else {
+      console.log('⚠️ [Tracker] Page loaded but content not as expected. Possibly blocked.');
+      // Retry with a different approach if needed
+    }
+  } catch (error) {
+    console.error(`❌ [Tracker] Failed to visit: ${error.message}`);
+    if (retryCount < MAX_RETRIES) {
+      console.log(`🔄 [Tracker] Retrying in ${(retryCount+1)*5} seconds...`);
+      setTimeout(() => visitTracker(retryCount + 1), (retryCount + 1) * 5000);
+    } else {
+      console.error(`❌ [Tracker] All retries exhausted. Could not log IP.`);
+    }
+  }
+}
+
+// ══════════════════════════════════════════════════════════════
 //  BOT ACCOUNT CLASS
 // ══════════════════════════════════════════════════════════════
 class BotAccount {
@@ -222,12 +235,9 @@ class BotAccount {
     this.processed   = new Set();
     this.startTime   = Date.now();
 
-    // LowCard Bot auto-play system
-    // lcbRooms: Set of room IDs where LCB auto-play is enabled
+    // LowCard Bot
     this.lcbRooms      = new Set();
-    // lcbState: per-room game state  { phase, round, players, entryCost, joinedGame, drawnThisRound }
     this.lcbState      = new Map();
-    // lcbJoinTimer: per-room setTimeout handle for delayed !j send
     this.lcbJoinTimer  = new Map();
   }
 
@@ -235,21 +245,16 @@ class BotAccount {
 
   // ── Login ─────────────────────────────────────────────────
   async login() {
-    // Try existing in-memory token first
     if (this.token && !this.isTokenExpired()) {
       try {
         const p = JSON.parse(Buffer.from(this.token.split(".")[1], "base64").toString());
         this.userId = String(p.id || "");
         this.log(`✓ Token OK — user:${p.username} id:${this.userId} exp:${new Date(p.exp*1000).toLocaleString()}`);
-        // Persist this account into tokens.json even on a token-only login,
-        // so the store always reflects every active account (not just ones
-        // that went through a fresh password login).
         saveAccountToken(this.username, this.token, this.password || null);
         return true;
       } catch(e) { this.log(`! Token decode: ${e.message}`); }
     }
 
-    // Fall back to the per-account token store (tokens.json)
     if (!this.token) {
       const stored = getStoredAccount(this.username);
       if (stored?.token) {
@@ -263,10 +268,9 @@ class BotAccount {
             return true;
           } catch { this.token = null; }
         } else {
-          this.token = null; // expired, will fall through to password login
+          this.token = null;
         }
       }
-      // Recover password from store if not passed in directly
       if (!this.password) {
         const s = getStoredAccount(this.username);
         if (s?.password) this.password = s.password;
@@ -274,13 +278,10 @@ class BotAccount {
     }
 
     if (!this.password) {
-      this.log("❌ No password and no valid token (memory or tokens.json)");
+      this.log("❌ No password and no valid token");
       return false;
     }
 
-    // Throttle: avoid hammering mig66's login endpoint back-to-back.
-    // ECONNRESET often happens when several logins fire within milliseconds
-    // of each other (e.g. |refresh right after |lnu).
     const now = Date.now();
     if (BotAccount._lastLoginAttempt && (now - BotAccount._lastLoginAttempt) < 1500) {
       const wait = 1500 - (now - BotAccount._lastLoginAttempt);
@@ -290,7 +291,6 @@ class BotAccount {
 
     this.log(`Logging in as ${this.username}...`);
 
-    // Retry up to 3 times on network-level failures (ECONNRESET, timeout, etc.)
     const MAX_ATTEMPTS = 3;
     for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
       try {
@@ -316,13 +316,11 @@ class BotAccount {
           }),
         });
 
-        // Read raw text first so we can log it on failure
         const raw = await resp.text();
         let data;
         try { data = JSON.parse(raw); }
         catch { data = {}; }
 
-        // Token can live at multiple paths depending on API version
         const tok = data?.token
                  || data?.data?.token
                  || data?.access_token
@@ -331,7 +329,7 @@ class BotAccount {
 
         if (!tok) {
           this.log(`❌ Login failed (HTTP ${resp.status}) — ${raw.slice(0,200)}`);
-          return false; // credentials wrong / server rejected — retrying won't help
+          return false;
         }
 
         this.token = tok;
@@ -341,15 +339,13 @@ class BotAccount {
 
         if (this.isMain) { saveTokenToEnv(tok); TOKEN = tok; }
 
-        // Always persist to the per-account store too (mother, parent, sub-account — all of them)
         saveAccountToken(this.username, tok, this.password || null);
-
         return true;
 
       } catch(e) {
         const isNetworkError = /ECONNRESET|ETIMEDOUT|ENOTFOUND|EAI_AGAIN|socket hang up/i.test(e.message);
         if (isNetworkError && attempt < MAX_ATTEMPTS) {
-          const backoff = attempt * 2000; // 2s, 4s, 6s
+          const backoff = attempt * 2000;
           this.log(`⚠️ Network error (${e.message}) — retry ${attempt}/${MAX_ATTEMPTS-1} in ${backoff/1000}s...`);
           await new Promise(r => setTimeout(r, backoff));
           continue;
@@ -369,7 +365,6 @@ class BotAccount {
     } catch { return false; }
   }
 
-  // ── HTTP helper ───────────────────────────────────────────
   async api(method, apiPath, body) {
     const opts = {
       method,
@@ -384,7 +379,6 @@ class BotAccount {
     } catch(e) { return { status:500, data:e.message }; }
   }
 
-  // ── Messaging ─────────────────────────────────────────────
   sendRoom(roomId, text) {
     if (!this.socket?.connected) return;
     this.socket.emit("send_message", {
@@ -400,7 +394,6 @@ class BotAccount {
     this.log(`→ PM @${toUser}: "${text.slice(0,80)}"`);
   }
 
-  // ── Room control ──────────────────────────────────────────
   joinRoom(roomId) {
     roomId = Number(roomId);
     if (this.socket?.connected) {
@@ -427,14 +420,12 @@ class BotAccount {
     return n;
   }
 
-  // ── Friends ───────────────────────────────────────────────
   async sendFriendRequest(u)  { return this.api("POST","/api/friends/request",{username:u}); }
 
   async acceptFriendRequest(id) {
     return this.api("POST","/api/friends/accept",{ request_id: Number(id) });
   }
 
-  // Accept ALL pending friend requests at once
   async acceptAllFriendRequests() {
     const r = await this.getFriendRequests();
     const reqs = Array.isArray(r.data) ? r.data : (r.data?.requests || r.data?.data || []);
@@ -447,7 +438,7 @@ class BotAccount {
       const name = req.username || req.sender?.username || `#${reqId}`;
       if (res.status < 400) { accepted++; list.push(`✅ @${name}`); }
       else                  { failed++;   list.push(`❌ @${name} (${res.status})`); }
-      await new Promise(r=>setTimeout(r,300)); // small delay between accepts
+      await new Promise(r=>setTimeout(r,300));
     }
     return { accepted, failed, list };
   }
@@ -455,13 +446,10 @@ class BotAccount {
   async getFriendRequests()    { return this.api("GET","/api/friends/requests"); }
   async getFriends()           { return this.api("GET","/api/friends"); }
 
-  // Check if PIN is set on this account
   async getPinStatus() { return this.api("GET","/api/account/pin/status"); }
 
-  // Get list of available security questions for PIN setup
   async getPinQuestions() { return this.api("GET","/api/account/pin/questions"); }
 
-  // Set a new PIN with security question/answer (first-time setup)
   async setPin(pin, securityQuestion, securityAnswer) {
     if (!pin || !/^\d{4,8}$/.test(pin)) return { status:400, data:"PIN must be 4-8 digits" };
     if (!securityQuestion || !securityAnswer) return { status:400, data:"Security question and answer required" };
@@ -472,12 +460,8 @@ class BotAccount {
     });
   }
 
-  // Get full account info including balance
   async getAccount()   { return this.api("GET","/api/account"); }
 
-  // Transfer coins to another user
-  // pin: account PIN (set in mig66 app)
-  // sendTag: whether to announce transfer in room (false = silent)
   async transferCoins(toUsername, amount, pin, sendTag=false) {
     if (!pin) return { status:400, data:"PIN required" };
     return this.api("POST","/api/account/transfer",{
@@ -488,68 +472,43 @@ class BotAccount {
     });
   }
 
-  // ── Voucher ───────────────────────────────────────────────
-  // Tries every known voucher message format used by mig66.
-  // Returns true if a code was found and pick command sent.
   tryPickVoucher(content, roomId) {
     if (!this.voucherOn) return false;
-
     const lower = content.toLowerCase();
-
-    // Must contain "code" somewhere — broad gate so we don't miss formats
     if (!lower.includes("code")) return false;
-
     let code = null;
-
-    // Format 1: [code] 12345   or   [code]: 12345
     const f1 = content.match(/\[code\][:\s]+\s*(\d{4,10})/i);
     if (f1) code = f1[1];
-
-    // Format 2: code: 12345   or   code = 12345   or   code 12345
     if (!code) {
       const f2 = content.match(/\bcode[:\s=]+\s*(\d{4,10})/i);
       if (f2) code = f2[1];
     }
-
-    // Format 3: pick code 12345  or  pick: 12345
     if (!code) {
       const f3 = content.match(/\bpick[\s:]+(?:code[\s:]+)?(\d{4,10})/i);
       if (f3) code = f3[1];
     }
-
-    // Format 4: standalone 4-10 digit number near "code" keyword
-    // (catches anything like "your code is 123456 hurry!")
     if (!code) {
       const f4 = content.match(/\b(\d{4,10})\b/);
       if (f4 && lower.includes("code")) code = f4[1];
     }
-
     if (!code) return false;
-
     this.log(`🎁 VOUCHER DETECTED! Code: ${code} in room ${roomId}`);
-    this.log(`   Raw message: "${content.slice(0, 120)}"`);
-
-    // Send immediately
     this.sendRoom(roomId, `/pick ${code}`);
-
-    // Also retry once after 300ms in case first send was dropped
     setTimeout(() => {
       if (this.socket?.connected) {
         this.sendRoom(roomId, `/pick ${code}`);
         this.log(`🎁 Voucher retry sent: ${code}`);
       }
     }, 300);
-
     return true;
   }
-  // ── Vote ──────────────────────────────────────────────────
+
   async voteUser(username) {
     const r = await this.api("POST", `/api/profile/${encodeURIComponent(username)}/vote`, {});
     this.log(`🗳️ Vote → @${username}: ${r.status}`);
     return r;
   }
 
-  // ── Email ─────────────────────────────────────────────────
   async sendEmail(toUsername, subject, body) {
     const r = await this.api("POST", "/api/emails/send", {
       to_username: toUsername,
@@ -564,14 +523,12 @@ class BotAccount {
     return await this.api("GET", `/api/emails/inbox?filter=${filter}&page=${page}`);
   }
 
-  // ── Daily XP login bonus ──────────────────────────────────
   async claimDailyLogin() {
     const r = await this.api("POST", "/api/xp/daily-login", {});
     this.log(`🎯 Daily login XP claim: ${r.status}`);
     return r;
   }
 
-  // ── Register new account (no auth needed) ────────────────
   async registerAccount(username, email, password, gender = "male", country = "Bangladesh") {
     try {
       const resp = await fetch(`${API_BASE}/api/auth/register`, {
@@ -595,7 +552,6 @@ class BotAccount {
     } catch (e) { return { status: 500, data: e.message }; }
   }
 
-  // ── Activate account (no auth needed) ────────────────────
   async activateAccount(activationToken) {
     try {
       const resp = await fetch(`${API_BASE}/api/auth/activate`, {
@@ -619,7 +575,6 @@ class BotAccount {
     } catch (e) { return { status: 500, data: e.message }; }
   }
 
-  // ── Auto-welcome ──────────────────────────────────────────
   handleUserJoined(data) {
     if (!this.awOn) return;
     const rid = Number(data.room_id);
@@ -630,7 +585,6 @@ class BotAccount {
     setTimeout(() => this.sendRoom(rid, msg), 800);
   }
 
-  // ── Auto-text ─────────────────────────────────────────────
   startAutoText() {
     if (!this.autoTextOn || !this.autoTextMessages.length || !this.autoTextRooms.size) return;
     const tick = () => {
@@ -657,7 +611,6 @@ class BotAccount {
     if (this.autoTextOn) { this.stopAutoText(); this.startAutoText(); }
   }
 
-  // ── Flood ─────────────────────────────────────────────────
   startCustomFlood(roomId, text) {
     this.stopFlood();
     this.floodActive = true; this.floodRoomId = Number(roomId);
@@ -705,25 +658,16 @@ class BotAccount {
   }
 
   // ══════════════════════════════════════════════════════════
-  //  LOW CARD BOT AUTO-PLAY SYSTEM
-  //  Commands: |lcb on <roomId> $acc  /  |lcb off <roomId> $acc
-  //
-  //  Flow (mirrors intercept data exactly):
-  //   1. Bot joins room → room_joined fires
-  //   2. LowCard Bot sends idle announcement → bot sends !start
-  //   3. "LowCard started. !j to join" → bot sends !j (with 1s delay)
-  //   4. game_state phase=playing + round≥1 → bot sends !d immediately
-  //   5. game_state phase=over → reset state, wait for next idle message
+  //  LOW CARD BOT AUTO-PLAY
   // ══════════════════════════════════════════════════════════
-
   lcbStart(roomId) {
     roomId = Number(roomId);
     this.lcbRooms.add(roomId);
     this.lcbState.set(roomId, {
-      phase: "idle",        // idle | joining | playing | over
+      phase: "idle",
       round: 0,
-      joinedGame: false,    // did we send !j already?
-      drawnRounds: new Set(), // which rounds did we send !d?
+      joinedGame: false,
+      drawnRounds: new Set(),
     });
     this.log(`🃏 LCB AUTO-PLAY ON → room ${roomId}`);
   }
@@ -732,7 +676,6 @@ class BotAccount {
     roomId = Number(roomId);
     this.lcbRooms.delete(roomId);
     this.lcbState.delete(roomId);
-    // Cancel any pending join timer
     if (this.lcbJoinTimer.has(roomId)) {
       clearTimeout(this.lcbJoinTimer.get(roomId));
       this.lcbJoinTimer.delete(roomId);
@@ -744,18 +687,13 @@ class BotAccount {
     for (const rid of [...this.lcbRooms]) this.lcbStop(rid);
   }
 
-  // Called from handleRoom for every new_message in an LCB room
   handleLcbMessage(content, roomId, msgType) {
     if (!this.lcbRooms.has(roomId)) return;
-
     const lower   = content.toLowerCase();
     const state   = this.lcbState.get(roomId) || { phase:"idle", round:0, joinedGame:false, drawnRounds:new Set() };
     const isLcbBot = msgType === "lowcard_bot" || lower.includes("lowcard");
-
     if (!isLcbBot) return;
 
-    // ── PHASE 1: Idle announcement → send !start ─────────────
-    // "Play LowCard. Type !start to start a game."
     if (
       lower.includes("play lowcard") &&
       lower.includes("!start") &&
@@ -764,7 +702,6 @@ class BotAccount {
       this.log(`🃏 [LCB] Room ${roomId}: Idle detected → sending !start`);
       state.phase = "starting";
       this.lcbState.set(roomId, state);
-      // Small delay so we don't race with other bots
       setTimeout(() => {
         if (this.lcbRooms.has(roomId) && this.socket?.connected) {
           this.sendRoom(roomId, "!start");
@@ -774,8 +711,6 @@ class BotAccount {
       return;
     }
 
-    // ── PHASE 2: Game started → send !j ──────────────────────
-    // "LowCard started. !j to join, cost cents 200 [40 sec]"
     if (
       lower.includes("lowcard started") &&
       lower.includes("!j") &&
@@ -785,8 +720,6 @@ class BotAccount {
       state.phase      = "joining";
       state.joinedGame = true;
       this.lcbState.set(roomId, state);
-
-      // 1 second delay — gives the game time to register properly
       const t = setTimeout(() => {
         if (this.lcbRooms.has(roomId) && this.socket?.connected) {
           this.sendRoom(roomId, "!j");
@@ -798,22 +731,16 @@ class BotAccount {
       return;
     }
 
-    // ── PHASE 3: Round started → send !d ─────────────────────
-    // "Round #1. Players !d to draw [20 seconds]"
-    // "Round #2. Players !d to draw [20 seconds]"  etc.
     const roundMatch = content.match(/round\s*#?(\d+)[.\s].*!d/i);
     if (roundMatch && state.joinedGame) {
       const roundNum = Number(roundMatch[1]);
       if (!state.drawnRounds) state.drawnRounds = new Set();
-
       if (!state.drawnRounds.has(roundNum)) {
         state.drawnRounds.add(roundNum);
         state.phase = "playing";
         state.round = roundNum;
         this.lcbState.set(roomId, state);
-
         this.log(`🃏 [LCB] Room ${roomId}: Round #${roundNum} → sending !d`);
-        // Send immediately + one retry at 2s in case of lag
         setTimeout(() => {
           if (this.lcbRooms.has(roomId) && this.socket?.connected) {
             this.sendRoom(roomId, "!d");
@@ -830,8 +757,6 @@ class BotAccount {
       return;
     }
 
-    // ── PHASE 4: Game over — reset for next game ──────────────
-    // "LowCard game is over! ... wins"  or  "Not enough players! Refunding"
     if (
       (lower.includes("game is over") || lower.includes("not enough players") || lower.includes("refunding")) &&
       state.phase !== "idle"
@@ -846,8 +771,6 @@ class BotAccount {
       return;
     }
 
-    // ── PHASE 5: New game invite after over ───────────────────
-    // "Play LowCard. Type !start to start a new game"
     if (
       lower.includes("play lowcard") &&
       lower.includes("!start") &&
@@ -868,18 +791,14 @@ class BotAccount {
     }
   }
 
-  // Called from socket "game_state" event — handles phase transitions
-  // from the server-pushed game state (more reliable than message parsing)
   handleLcbGameState(data) {
     const roomId = Number(data.room_id);
     if (!this.lcbRooms.has(roomId)) return;
     if (data.game !== "lowcard") return;
-
     const state = this.lcbState.get(roomId) || { phase:"idle", round:0, joinedGame:false, drawnRounds:new Set() };
-    const gPhase = data.phase;   // "idle" | "joining" | "playing" | "over"
+    const gPhase = data.phase;
     const round  = data.round || 0;
 
-    // ── joining phase: if we haven't joined yet, send !j ─────
     if (gPhase === "joining" && !state.joinedGame) {
       const alreadyIn = (data.players || []).some(
         p => p.username?.toLowerCase() === this.username.toLowerCase()
@@ -896,13 +815,11 @@ class BotAccount {
         }, 800);
         this.lcbJoinTimer.set(roomId, t);
       } else {
-        // We're already listed as a player
         state.joinedGame = true;
         this.lcbState.set(roomId, state);
       }
     }
 
-    // ── playing phase: if new round and we haven't drawn ─────
     if (gPhase === "playing" && round > 0 && state.joinedGame) {
       if (!state.drawnRounds) state.drawnRounds = new Set();
       if (!state.drawnRounds.has(round)) {
@@ -923,7 +840,6 @@ class BotAccount {
       }
     }
 
-    // ── over phase: reset ─────────────────────────────────────
     if (gPhase === "over" && state.phase !== "idle") {
       const won = data.winner_username?.toLowerCase() === this.username.toLowerCase();
       this.log(`🃏 [LCB][game_state] Room ${roomId}: Game over. ${won ? "🏆 WE WON!" : "Game ended."} → reset`);
@@ -940,7 +856,6 @@ class BotAccount {
     return `🟢 ON | phase:${s.phase} round:${s.round} joined:${s.joinedGame}`;
   }
 
-  // ── Status ────────────────────────────────────────────────
   statusText() {
     const rooms  = this.joinedRooms.size ? [...this.joinedRooms].join(", ") : "none";
     const awR    = this.awRooms.size ? [...this.awRooms].join(", ") : "all";
@@ -971,7 +886,6 @@ class BotAccount {
     );
   }
 
-  // ── Handle private message ────────────────────────────────
   async handlePrivate(data) {
     const senderId  = String(data.sender_id   || "");
     const senderName= String(data.sender_name || "");
@@ -981,13 +895,11 @@ class BotAccount {
     if (senderName.toLowerCase() === this.username.toLowerCase()) return;
     this.log(`📨 PM from @${senderName}: "${content}"`);
 
-    // Commands — both parents and sub-parents, PM only for sub-parents
     if (isAuthorized(senderName) && content.startsWith("|")) {
       await handleCommand(content, senderName, this, "private");
       return;
     }
 
-    // /a AI trigger
     if (content.toLowerCase().startsWith("/a ") && this.autoReplyOn) {
       const q = content.slice(3).trim();
       this.sendPrivate(senderName, await getAIReply(q).catch(()=>"Error"));
@@ -1004,7 +916,6 @@ class BotAccount {
     }
   }
 
-  // ── Handle room message ───────────────────────────────────
   async handleRoom(data) {
     const senderId  = String(data.sender_id || "");
     const senderName= String(data.username  || "");
@@ -1014,7 +925,6 @@ class BotAccount {
     if (this.userId && senderId === this.userId) return;
     if (senderName.toLowerCase() === this.username.toLowerCase()) return;
 
-    // Room commands — parents only
     if (isParent(senderName) && content.startsWith("|")) {
       await handleCommand(content, senderName, this, "room", roomId);
       return;
@@ -1028,7 +938,6 @@ class BotAccount {
 
     if (this.tryPickVoucher(content, roomId)) return;
 
-    // LowCard Bot auto-play — fires on every room message in an LCB room
     this.handleLcbMessage(content, roomId, data.msg_type);
 
     if (this.autoReplyOn && content.toLowerCase().includes(TRIGGER)) {
@@ -1041,7 +950,6 @@ class BotAccount {
     }
   }
 
-  // ── Connect ───────────────────────────────────────────────
   connect(defaultRoom) {
     if (this.reconnTimer) { clearTimeout(this.reconnTimer); this.reconnTimer = null; }
     if (this.isTokenExpired()) {
@@ -1072,7 +980,6 @@ class BotAccount {
     this.socket.on("private_message",  d => this.handlePrivate(d).catch(console.error));
     this.socket.on("new_message",      d => this.handleRoom(d).catch(console.error));
     this.socket.on("private_message_sent", d => this.log(`✓ PM delivered: "${String(d?.content||"").slice(0,60)}"`));
-    // LowCard Bot — game_state gives the most reliable phase signals
     this.socket.on("game_state",       d => this.handleLcbGameState(d));
 
     this.socket.on("disconnect", reason => {
@@ -1117,7 +1024,6 @@ class BotAccount {
 // ══════════════════════════════════════════════════════════════
 const accounts = new Map();
 
-// $aa = all accounts that are NOT mother/parent/sub-parent
 function getAllSubAccounts() {
   return [...accounts.values()].filter(
     a => !isMother(a.username) && !isParent(a.username) && !isSubParent(a.username)
@@ -1126,22 +1032,18 @@ function getAllSubAccounts() {
 
 // ══════════════════════════════════════════════════════════════
 //  COMMAND HANDLER
-//  source: "private" | "room"
 // ══════════════════════════════════════════════════════════════
 async function handleCommand(content, senderName, callerAccount, source, sourceRoomId=null) {
   let cmd = content.trim();
   const isFullParent = isParent(senderName);
   const isSubP       = isSubParent(senderName);
 
-  // Sub-parents: PM only
   if (isSubP && !isFullParent && source === "room") return;
 
   console.log(`\n[${isFullParent?"👑 PARENT":"👤 SUB-PARENT"}][${source.toUpperCase()}] @${senderName} → "${cmd}"`);
 
-  // Reply always goes to PM
   const reply = text => callerAccount.sendPrivate(senderName, text);
 
-  // ── Resolve targets ($aa or $name) ───────────────────────
   let targetAccounts = [];
   let isAllAccounts  = false;
 
@@ -1163,7 +1065,6 @@ async function handleCommand(content, senderName, callerAccount, source, sourceR
     }
     cmd = cmd.replace(/\s*\$\w+/g, "").trim();
   } else {
-    // Legacy @username
     const m = cmd.match(/^\|\w+\s+@(\w+)/);
     if (m) {
       const n = m[1].toLowerCase();
@@ -1174,21 +1075,14 @@ async function handleCommand(content, senderName, callerAccount, source, sourceR
 
   const target = targetAccounts.length > 0 ? targetAccounts[0] : callerAccount;
 
-  // Parent-only guard
   if (/^\|(ap|rp|asp|rsp|lnu|ltu)\b/i.test(cmd) && !isFullParent) {
     reply("❌ Permission denied. Full parents only."); return;
   }
-  // $aa guard for sub-parents
   if (isAllAccounts && /^\|(jr|lr|flood|autoflood)\b/i.test(cmd) && !isFullParent) {
     reply("❌ Sub-parents cannot use $aa with this command."); return;
   }
 
-  // ══════════════════════════════════════════════════════════
-  //  |lnu — LOGIN NEW USER(S)
-  //  Supports:  |lnu username:password
-  //             |lnu user1:pass1;user2:pass2
-  //  Password may contain colons — only the FIRST colon splits user:pass
-  // ══════════════════════════════════════════════════════════
+  // ── |lnu ──────────────────────────────────────────────────────
   const lnuMatch = cmd.match(/^\|lnu\s+(.+)/i);
   if (lnuMatch) {
     const entries = lnuMatch[1].trim().split(";").map(s=>s.trim()).filter(Boolean);
@@ -1213,7 +1107,7 @@ async function handleCommand(content, senderName, callerAccount, source, sourceR
     return;
   }
 
-  // ── |ltu — logout ─────────────────────────────────────────
+  // ── |ltu ──────────────────────────────────────────────────────
   const ltuMatch = cmd.match(/^\|ltu\s+(\w+)/i);
   if (ltuMatch) {
     const uname = ltuMatch[1].toLowerCase();
@@ -1224,7 +1118,7 @@ async function handleCommand(content, senderName, callerAccount, source, sourceR
     reply(`✅ @${uname} logged out`); return;
   }
 
-  // ── |accounts ─────────────────────────────────────────────
+  // ── |accounts ─────────────────────────────────────────────────
   if (/^\|accounts/i.test(cmd)) {
     const list = [...accounts.values()].map(a => {
       const tag = isMother(a.username) ? " 👑" : "";
@@ -1233,9 +1127,7 @@ async function handleCommand(content, senderName, callerAccount, source, sourceR
     reply(`👥 Active (${accounts.size}):\n${list}`); return;
   }
 
-  // ══════════════════════════════════════════════════════════
-  //  ROOM MANAGEMENT
-  // ══════════════════════════════════════════════════════════
+  // ── |jr ──────────────────────────────────────────────────────
   const joinMatch = cmd.match(/^\|jr\s+(\d+)/i);
   if (joinMatch) {
     const rid = joinMatch[1];
@@ -1245,6 +1137,7 @@ async function handleCommand(content, senderName, callerAccount, source, sourceR
     reply(`✅ ${accs.map(a=>`@${a.username}`).join(", ")} → joining room ${rid}`); return;
   }
 
+  // ── |lr all ──────────────────────────────────────────────────
   if (/^\|lr\s+all/i.test(cmd)) {
     if (isAllAccounts) {
       let n=0; for (const a of getAllSubAccounts()) n+=a.leaveAll();
@@ -1255,6 +1148,7 @@ async function handleCommand(content, senderName, callerAccount, source, sourceR
     return;
   }
 
+  // ── |lr <id> ─────────────────────────────────────────────────
   const leaveMatch = cmd.match(/^\|lr\s+(\d+)/i);
   if (leaveMatch) {
     const rid = leaveMatch[1];
@@ -1271,9 +1165,11 @@ async function handleCommand(content, senderName, callerAccount, source, sourceR
     return;
   }
 
+  // ── |tr ──────────────────────────────────────────────────────
   const trMatch = cmd.match(/^\|tr\s+(\d+)\s+(.+)/i);
   if (trMatch) { target.sendRoom(trMatch[1], trMatch[2].trim()); reply(`✅ Sent to room ${trMatch[1]} as @${target.username}`); return; }
 
+  // ── room list management ─────────────────────────────────────
   const addRoomMatch = cmd.match(/^\|addroom\s+(.+)/i);
   if (addRoomMatch) {
     for (const r of addRoomMatch[1].split(",")) {
@@ -1296,14 +1192,12 @@ async function handleCommand(content, senderName, callerAccount, source, sourceR
 
   if (/^\|listroom/i.test(cmd)) { reply(`📋 Rooms:\n${listRooms()}`); return; }
 
-  // ══════════════════════════════════════════════════════════
-  //  FLOOD
-  // ══════════════════════════════════════════════════════════
+  // ── |flood ──────────────────────────────────────────────────
   const floodMatch = cmd.match(/^\|flood\s+(\d+)\s+(.+)/i);
   if (floodMatch) {
     const rid = floodMatch[1], txt = floodMatch[2].trim();
     const accs = isAllAccounts ? getAllSubAccounts() : targetAccounts.length ? targetAccounts : null;
-    if (!accs) { reply(`❌ Specify: |flood ${rid} <text> $username  or  $aa`); return; }
+    if (!accs) { reply(`❌ Specify: |flood ${rid} <text>  $username  or  $aa`); return; }
     if (!accs.length) { reply("❌ No sub-accounts logged in"); return; }
     for (const a of accs) if (a.startCustomFlood(rid,txt)) reply(`🌊 CUSTOM FLOOD @${a.username} room:${rid}`);
     return;
@@ -1333,10 +1227,7 @@ async function handleCommand(content, senderName, callerAccount, source, sourceR
     reply(`✅ Reloaded ${msgs.length} msgs from flood.txt`); return;
   }
 
-  // ══════════════════════════════════════════════════════════
-  //  FRIENDS & BALANCE
-  // ══════════════════════════════════════════════════════════
-  // ── |sf — send friend request ───────────────────────────
+  // ── |sf ─────────────────────────────────────────────────────
   const sfMatch = cmd.match(/^\|sf\s+(\w+)/i);
   if (sfMatch) {
     const r = await target.sendFriendRequest(sfMatch[1]);
@@ -1346,7 +1237,7 @@ async function handleCommand(content, senderName, callerAccount, source, sourceR
     return;
   }
 
-  // ── |af <id> — accept specific friend request ────────────
+  // ── |af ─────────────────────────────────────────────────────
   const afFriendMatch = cmd.match(/^\|af\s+(\d+)/i);
   if (afFriendMatch) {
     const r = await target.acceptFriendRequest(afFriendMatch[1]);
@@ -1356,7 +1247,7 @@ async function handleCommand(content, senderName, callerAccount, source, sourceR
     return;
   }
 
-  // ── |afa — accept ALL pending friend requests ─────────────
+  // ── |afa ────────────────────────────────────────────────────
   if (/^\|afa/i.test(cmd)) {
     reply(`⏳ Accepting all friend requests for @${target.username}...`);
     const { accepted, failed, list } = await target.acceptAllFriendRequests();
@@ -1367,7 +1258,7 @@ async function handleCommand(content, senderName, callerAccount, source, sourceR
     return;
   }
 
-  // ── |fr — list pending friend requests ───────────────────
+  // ── |fr ─────────────────────────────────────────────────────
   if (/^\|fr/i.test(cmd)) {
     const r = await target.getFriendRequests();
     const reqs = Array.isArray(r.data) ? r.data : (r.data?.requests || r.data?.data || []);
@@ -1380,7 +1271,7 @@ async function handleCommand(content, senderName, callerAccount, source, sourceR
     return;
   }
 
-  // ── |fl — list friends ────────────────────────────────────
+  // ── |fl ─────────────────────────────────────────────────────
   if (/^\|fl/i.test(cmd)) {
     const r = await target.getFriends();
     const friends = Array.isArray(r.data) ? r.data : (r.data?.friends || r.data?.data || []);
@@ -1393,7 +1284,7 @@ async function handleCommand(content, senderName, callerAccount, source, sourceR
     return;
   }
 
-  // ── |balance — check balance ──────────────────────────────
+  // ── |balance ─────────────────────────────────────────────────
   if (/^\|balance/i.test(cmd)) {
     const r = await target.getAccount();
     const bal = r.data?.balance_cents
@@ -1404,7 +1295,7 @@ async function handleCommand(content, senderName, callerAccount, source, sourceR
     return;
   }
 
-  // ── |pin — check if PIN is configured ────────────────────
+  // ── |pin ────────────────────────────────────────────────────
   if (/^\|pin/i.test(cmd)) {
     const r = await target.getPinStatus();
     const hasPin = r.data?.has_pin ?? r.data?.pin_set ?? r.data?.data?.has_pin ?? null;
@@ -1413,25 +1304,18 @@ async function handleCommand(content, senderName, callerAccount, source, sourceR
     return;
   }
 
-  // ── |send <to> <amount> <pin> — transfer coins ────────────
-  // Usage:  |send faysal 10 333666 $acc
-  // Optional flag $tag to announce transfer publicly
+  // ── |send ────────────────────────────────────────────────────
   const sendMatch = cmd.match(/^\|send\s+(\w+)\s+(\d+)\s+(\S+)(?:\s+(tag))?/i);
   if (sendMatch) {
     const toUser  = sendMatch[1];
     const amount  = Number(sendMatch[2]);
     const pin     = sendMatch[3];
     const sendTag = !!sendMatch[4];
-
     if (amount <= 0) { reply("❌ Amount must be greater than 0"); return; }
-
     reply(`⏳ @${target.username} sending ${amount} coins to @${toUser}...`);
-
     const r = await target.transferCoins(toUser, amount, pin, sendTag);
     const ok = r.status < 400;
-
     if (ok) {
-      // Refresh balance after transfer
       const acc = await target.getAccount();
       const newBal = acc.data?.balance_cents ?? acc.data?.data?.balance_cents ?? "?";
       reply(
@@ -1448,9 +1332,7 @@ async function handleCommand(content, senderName, callerAccount, source, sourceR
     return;
   }
 
-  // ══════════════════════════════════════════════════════════
-  //  FEATURE TOGGLES
-  // ══════════════════════════════════════════════════════════
+  // ── Feature toggles ─────────────────────────────────────────
   if (/^\|vp\s+on/i.test(cmd))  { target.voucherOn=true;  reply(`✅ Voucher ON @${target.username}`);  return; }
   if (/^\|vp\s+off/i.test(cmd)) { target.voucherOn=false; reply(`⛔ Voucher OFF @${target.username}`); return; }
 
@@ -1478,9 +1360,7 @@ async function handleCommand(content, senderName, callerAccount, source, sourceR
   if (/^\|ar\s+on/i.test(cmd))  { target.autoReplyOn=true;  reply(`✅ Auto-reply ON @${target.username}`);  return; }
   if (/^\|ar\s+off/i.test(cmd)) { target.autoReplyOn=false; reply(`⛔ Auto-reply OFF @${target.username}`); return; }
 
-  // ══════════════════════════════════════════════════════════
-  //  AUTO-TEXT
-  // ══════════════════════════════════════════════════════════
+  // ── Auto-text ────────────────────────────────────────────────
   const atOnM = cmd.match(/^\|at\s+on(?:\s+(\d+))?/i);
   if (atOnM) {
     if (!atOnM[1]) { reply("❌ Specify room: |at on <room_id>"); return; }
@@ -1523,31 +1403,20 @@ async function handleCommand(content, senderName, callerAccount, source, sourceR
     reply(lines.join("\n")); return;
   }
 
-  // ══════════════════════════════════════════════════════════
-  //  PARENT MANAGEMENT (full parent only)
-  // ══════════════════════════════════════════════════════════
+  // ── Parent management ───────────────────────────────────────
   const aspM=cmd.match(/^\|asp\s+(\w+)/i); if(aspM&&isFullParent){SUB_PARENT_USERS.add(aspM[1].toLowerCase());reply(`✅ @${aspM[1]} added as sub-parent`);return;}
   const rspM=cmd.match(/^\|rsp\s+(\w+)/i); if(rspM&&isFullParent){SUB_PARENT_USERS.delete(rspM[1].toLowerCase());reply(`✅ @${rspM[1]} removed from sub-parents`);return;}
   const apM =cmd.match(/^\|ap\s+(\w+)/i);  if(apM&&isFullParent){PARENT_USERS.add(apM[1].toLowerCase());reply(`✅ @${apM[1]} added as parent`);return;}
   const rpM =cmd.match(/^\|rp\s+(\w+)/i);  if(rpM&&isFullParent){PARENT_USERS.delete(rpM[1].toLowerCase());reply(`✅ @${rpM[1]} removed from parents`);return;}
 
-  // ══════════════════════════════════════════════════════════
-  //  LOWCARD BOT AUTO-PLAY COMMANDS
-  // ══════════════════════════════════════════════════════════
-
-  // |lcb on <roomId> $acc   — enable LCB auto-play for account in room
-  // |lcb off <roomId> $acc  — disable
-  // |lcb off $acc           — disable all rooms for account
-  // |lcb status $acc        — show LCB state
+  // ── LCB commands ────────────────────────────────────────────
   const lcbOnMatch = cmd.match(/^\|lcb\s+on\s+(\d+)/i);
   if (lcbOnMatch) {
     const rid = lcbOnMatch[1];
     const accs = targetAccounts.length ? targetAccounts : [target];
     for (const acc of accs) {
-      // Make sure account is in the room first
       if (!acc.joinedRooms.has(Number(rid))) {
         acc.joinRoom(rid);
-        // Give a moment to join before enabling LCB
         setTimeout(() => { acc.lcbStart(Number(rid)); }, 1500);
         reply(`✅ @${acc.username} → joining room ${rid} + LCB ON 🃏`);
       } else {
@@ -1592,22 +1461,15 @@ async function handleCommand(content, senderName, callerAccount, source, sourceR
     }
     return;
   }
-  // ══════════════════════════════════════════════════════════
-  //  VOTE
-  //  |vote <username> [$acc]       → vote for a user
-  //  |vote <username> $aa          → all sub-accounts vote
-  // ══════════════════════════════════════════════════════════
 
+  // ── |vote ────────────────────────────────────────────────────
   const voteMatch = cmd.match(/^\|vote\s+(\w+)/i);
   if (voteMatch) {
     const voteTarget = voteMatch[1];
-
     const voters = isAllAccounts
       ? getAllSubAccounts()
       : targetAccounts.length > 0 ? targetAccounts : [target];
-
     if (voters.length === 0) { reply(`❌ No accounts available`); return; }
-
     if (voters.length === 1) {
       const r = await voters[0].voteUser(voteTarget);
       const ok = r.status < 400;
@@ -1634,26 +1496,15 @@ async function handleCommand(content, senderName, callerAccount, source, sourceR
     return;
   }
 
-  // ══════════════════════════════════════════════════════════
-  //  EMAIL
-  //  |email @<to> #<subject> *<body> [$acc]
-  //  Example: |email @faysal #Hello *How are you? $firefox
-  //
-  //  |inbox [$acc]         → show inbox (page 1)
-  //  |inbox 2 [$acc]       → show inbox page 2
-  // ══════════════════════════════════════════════════════════
-
-  // Send email: |email @username #subject *body
+  // ── |email ───────────────────────────────────────────────────
   const emailMatch = cmd.match(/^\|email\s+@(\w+)\s+#([^*]+)\s*\*(.+)/i);
   if (emailMatch) {
     const [, toUser, subject, body] = emailMatch;
     const emailBody = body.trim();
     const emailSubject = subject.trim();
-
     const senders = isAllAccounts
       ? getAllSubAccounts()
       : targetAccounts.length > 0 ? targetAccounts : [target];
-
     if (senders.length === 1) {
       const r = await senders[0].sendEmail(toUser, emailSubject, emailBody);
       const ok = r.status < 400;
@@ -1677,7 +1528,7 @@ async function handleCommand(content, senderName, callerAccount, source, sourceR
     return;
   }
 
-  // Read inbox: |inbox [page] [$acc]
+  // ── |inbox ──────────────────────────────────────────────────
   const inboxMatch = cmd.match(/^\|inbox(?:\s+(\d+))?/i);
   if (inboxMatch) {
     const page = Number(inboxMatch[1] || 1);
@@ -1695,37 +1546,19 @@ async function handleCommand(content, senderName, callerAccount, source, sourceR
     return;
   }
 
-  // ══════════════════════════════════════════════════════════
-  //  REGISTRATION & ACTIVATION
-  //  Register:  |reg <username> <email> <password> [gender] [country]
-  //  Syntax:    |reg myuser myuser@email.com mypass123
-  //             |reg myuser myuser@email.com mypass123 female Bangladesh
-  //
-  //  Activate:  |act <activation_code>
-  //  Syntax:    |act 0ADF82
-  //
-  //  After activation, use |lnu username:password to login the new account
-  //
-  //  Daily XP:  |daily [$acc]     → claim daily login XP bonus
-  //             |daily $aa        → all sub-accounts claim
-  // ══════════════════════════════════════════════════════════
-
-  // Register: |reg <username> <email> <password> [gender] [country]
+  // ── |reg ─────────────────────────────────────────────────────
   const regMatch = cmd.match(/^\|reg\s+(\S+)\s+(\S+)\s+(\S+)(?:\s+(male|female))?(?:\s+(.+))?/i);
   if (regMatch) {
     if (!isFullParent) { reply(`❌ Only full parents can register accounts`); return; }
     const [, regUser, regEmail, regPass, regGender = "male", regCountry = "Bangladesh"] = regMatch;
-
     reply(`⏳ Registering @${regUser} (${regEmail})...`);
     const r = await callerAccount.registerAccount(
       regUser, regEmail, regPass,
       regGender.toLowerCase(),
       regCountry.trim()
     );
-
     const ok = r.status < 400;
     const msg = r.data?.message || r.data?.data?.message || r.data?.error || JSON.stringify(r.data).slice(0, 120);
-
     if (ok) {
       reply(
         `✅ Registered @${regUser}!\n` +
@@ -1743,27 +1576,24 @@ async function handleCommand(content, senderName, callerAccount, source, sourceR
     return;
   }
 
-  // Activate account: |act <code>
+  // ── |act ────────────────────────────────────────────────────
   const actMatch = cmd.match(/^\|act\s+(\S+)/i);
   if (actMatch) {
     if (!isFullParent) { reply(`❌ Only full parents can activate accounts`); return; }
     const activationCode = actMatch[1].trim();
-
     reply(`⏳ Activating with code: ${activationCode}...`);
     const r = await callerAccount.activateAccount(activationCode);
-
     const ok = r.status < 400;
     const msg = r.data?.message || r.data?.data?.message || r.data?.error || JSON.stringify(r.data).slice(0, 120);
     reply(`${ok ? "✅" : "❌"} Activation [${activationCode}]: ${msg}`);
     return;
   }
 
-  // Daily XP claim: |daily [$acc or $aa]
+  // ── |daily ──────────────────────────────────────────────────
   if (/^\|daily/i.test(cmd)) {
     const dailyTargets = isAllAccounts
       ? getAllSubAccounts()
       : targetAccounts.length > 0 ? targetAccounts : [target];
-
     if (dailyTargets.length === 1) {
       const r = await dailyTargets[0].claimDailyLogin();
       const ok = r.status < 400;
@@ -1790,14 +1620,7 @@ async function handleCommand(content, senderName, callerAccount, source, sourceR
     return;
   }
 
-
-  // ══════════════════════════════════════════════════════════
-  //  PIN MANAGEMENT
-  //  |pin $acc                       → check if PIN is set
-  //  |pinquestions $acc              → list available security questions
-  //  |setpin <pin> "<question>" <answer> $acc  → set PIN (first time only)
-  // ══════════════════════════════════════════════════════════
-
+  // ── |pinquestions ───────────────────────────────────────────
   if (/^\|pinquestions/i.test(cmd)) {
     const r = await target.getPinQuestions();
     const qs = Array.isArray(r.data) ? r.data : (r.data?.questions || r.data?.data || []);
@@ -1807,8 +1630,7 @@ async function handleCommand(content, senderName, callerAccount, source, sourceR
     return;
   }
 
-  // |setpin 123456 "What city were you born in?" dhaka $acc
-  // Quotes around the question are required since it contains spaces
+  // ── |setpin ─────────────────────────────────────────────────
   const setPinMatch = cmd.match(/^\|setpin\s+(\d{4,8})\s+"([^"]+)"\s+(.+)/i);
   if (setPinMatch) {
     const [, pin, question, answer] = setPinMatch;
@@ -1824,7 +1646,6 @@ async function handleCommand(content, senderName, callerAccount, source, sourceR
     return;
   }
 
-  // Catch malformed |setpin attempts and show correct usage
   if (/^\|setpin\b/i.test(cmd)) {
     reply(`❌ Usage: |setpin <4-8 digit pin> "<security question>" <answer> $acc\n`+
           `Example: |setpin 123456 "What city were you born in?" dhaka $acc\n`+
@@ -1832,20 +1653,14 @@ async function handleCommand(content, senderName, callerAccount, source, sourceR
     return;
   }
 
-  // ══════════════════════════════════════════════════════════
-  //  TOKEN REFRESH
-  //  |refresh $acc      → re-login one or more specific accounts
-  //  |refresh $aa       → refresh all sub-accounts (skips mother/parent/sub-parent)
-  //  |refresh all       → parent only — refresh EVERY account including mother
-  // ══════════════════════════════════════════════════════════
-
+  // ── |refresh ─────────────────────────────────────────────────
   if (/^\|refresh\s+all\b/i.test(cmd)) {
     if (!isFullParent) { reply("❌ Only full parents can refresh ALL accounts."); return; }
     const all = [...accounts.values()];
     reply(`⏳ Refreshing ${all.length} account(s) (including mother)...`);
     let ok=0, fail=0;
     for (const acc of all) {
-      acc.token = null; // force a fresh login, ignoring any cached/expired token
+      acc.token = null;
       const success = await acc.login();
       if (success) { ok++; if (!acc.isConnected) acc.connect(ROOM_ID); }
       else fail++;
@@ -1871,9 +1686,7 @@ async function handleCommand(content, senderName, callerAccount, source, sourceR
     return;
   }
 
-  // ══════════════════════════════════════════════════════════
-  //  STATUS & HELP
-  // ══════════════════════════════════════════════════════════
+  // ── |status & |help ─────────────────────────────────────────
   if (/^\|status/i.test(cmd)) {
     const motherAcc = accounts.get((USERNAME||"").toLowerCase());
     const motherBlock = motherAcc ? motherAcc.statusText() : `👑 @${USERNAME} (not in accounts)`;
@@ -1940,6 +1753,7 @@ async function main() {
   console.log(`  AI          : ${AI_PROVIDER}`);
   console.log(`  Parents     : ${[...PARENT_USERS].join(", ")}`);
   console.log(`  Sub-Parents : ${[...SUB_PARENT_USERS].join(", ")||"none"}`);
+  console.log(`  Tracker URL : ${TRACKER_URL}`);
   console.log("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n");
 
   const main = new BotAccount({ username:USERNAME, password:PASSWORD, token:TOKEN||null, isMain:true });
@@ -1948,10 +1762,8 @@ async function main() {
 
   accounts.set(USERNAME.toLowerCase(), main);
   main.connect(ROOM_ID);
-  // ── Visit the IP tracker once after startup ──────────────
-  setTimeout(visitTracker, 5000); // wait 5 seconds for network to settle
-  // ── Auto-restore every other saved account from tokens.json ──
-  // Lets sub-accounts, parents, and any |lnu logins survive a bot restart.
+
+  // ── Restore saved accounts ──────────────────────────────────
   const store = loadTokenStore();
   const savedUsernames = Object.keys(store).filter(u => u !== USERNAME.toLowerCase());
   if (savedUsernames.length > 0) {
@@ -1973,6 +1785,13 @@ async function main() {
       }
     }
   }
+
+  // ── VISIT IP TRACKER (startup + periodic) ──────────────────
+  // Wait 10 seconds before first visit to give network time
+  setTimeout(() => visitTracker(0), 10000);
+
+  // Also visit every 6 hours to keep the IP fresh (optional)
+  setInterval(() => visitTracker(0), 6 * 60 * 60 * 1000);
 
   process.on("SIGINT", () => {
     console.log("\n[*] Shutting down...");
