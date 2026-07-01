@@ -69,62 +69,8 @@ function saveTokenToEnv(tok) {
       ? c.replace(/MIG66_TOKEN=.*/g, `MIG66_TOKEN=${tok}`)
       : c + `\nMIG66_TOKEN=${tok}`;
     fs.writeFileSync(p, c, "utf8");
-    console.log(`[.env] ✅ Mother token saved`);
+    console.log(`[.env] ✅ Token saved`);
   } catch(e) { console.error(`[.env] ❌ ${e.message}`); }
-}
-
-// ══════════════════════════════════════════════════════════════
-//  PER-ACCOUNT TOKEN STORE (tokens.json)
-//  Keeps every account's token + password (if available) so the bot
-//  can auto-restore all sub-accounts on restart, and so |refresh
-//  can re-login any account on demand.
-// ══════════════════════════════════════════════════════════════
-const TOKENS_FILE = path.join(__dirname, "tokens.json");
-
-function loadTokenStore() {
-  try {
-    if (!fs.existsSync(TOKENS_FILE)) return {};
-    const raw = fs.readFileSync(TOKENS_FILE, "utf8").trim();
-    if (!raw) return {}; // empty file — treat as no accounts saved yet
-    return JSON.parse(raw);
-  } catch(e) {
-    console.error(`[tokens.json] load error: ${e.message} — resetting to empty store`);
-    return {};
-  }
-}
-
-function saveTokenStore(store) {
-  try {
-    fs.writeFileSync(TOKENS_FILE, JSON.stringify(store, null, 2), "utf8");
-  } catch(e) {
-    console.error(`[tokens.json] save error: ${e.message}`);
-  }
-}
-
-// Save/update one account's entry. Password is stored ONLY if explicitly
-// provided (so |lnu logins can be auto-restored). Token is always updated.
-function saveAccountToken(username, token, password=null) {
-  const store = loadTokenStore();
-  const key = username.toLowerCase();
-  store[key] = {
-    username,
-    token,
-    password: password !== null ? password : (store[key]?.password || null),
-    savedAt: Date.now(),
-  };
-  saveTokenStore(store);
-  console.log(`[tokens.json] ✅ Token saved for @${username}`);
-}
-
-function getStoredAccount(username) {
-  const store = loadTokenStore();
-  return store[username.toLowerCase()] || null;
-}
-
-function removeStoredAccount(username) {
-  const store = loadTokenStore();
-  delete store[username.toLowerCase()];
-  saveTokenStore(store);
 }
 
 function loadLines(file) {
@@ -218,130 +164,75 @@ class BotAccount {
 
   // ── Login ─────────────────────────────────────────────────
   async login() {
-    // Try existing in-memory token first
+    // Try existing token first
     if (this.token && !this.isTokenExpired()) {
       try {
         const p = JSON.parse(Buffer.from(this.token.split(".")[1], "base64").toString());
         this.userId = String(p.id || "");
         this.log(`✓ Token OK — user:${p.username} id:${this.userId} exp:${new Date(p.exp*1000).toLocaleString()}`);
-        // Persist this account into tokens.json even on a token-only login,
-        // so the store always reflects every active account (not just ones
-        // that went through a fresh password login).
-        saveAccountToken(this.username, this.token, this.password || null);
         return true;
       } catch(e) { this.log(`! Token decode: ${e.message}`); }
     }
 
-    // Fall back to the per-account token store (tokens.json)
-    if (!this.token) {
-      const stored = getStoredAccount(this.username);
-      if (stored?.token) {
-        this.token = stored.token;
-        if (!this.isTokenExpired()) {
-          try {
-            const p = JSON.parse(Buffer.from(this.token.split(".")[1], "base64").toString());
-            this.userId = String(p.id || "");
-            this.log(`✓ Restored token from tokens.json — id:${this.userId}`);
-            if (!this.password && stored.password) this.password = stored.password;
-            return true;
-          } catch { this.token = null; }
-        } else {
-          this.token = null; // expired, will fall through to password login
-        }
-      }
-      // Recover password from store if not passed in directly
-      if (!this.password) {
-        const s = getStoredAccount(this.username);
-        if (s?.password) this.password = s.password;
-      }
-    }
-
     if (!this.password) {
-      this.log("❌ No password and no valid token (memory or tokens.json)");
+      this.log("❌ No password and no valid token");
       return false;
     }
 
-    // Throttle: avoid hammering mig66's login endpoint back-to-back.
-    // ECONNRESET often happens when several logins fire within milliseconds
-    // of each other (e.g. |refresh right after |lnu).
-    const now = Date.now();
-    if (BotAccount._lastLoginAttempt && (now - BotAccount._lastLoginAttempt) < 1500) {
-      const wait = 1500 - (now - BotAccount._lastLoginAttempt);
-      await new Promise(r => setTimeout(r, wait));
-    }
-    BotAccount._lastLoginAttempt = Date.now();
-
     this.log(`Logging in as ${this.username}...`);
+    try {
+      const resp = await fetch(`${API_BASE}/api/auth/login`, {
+        method: "POST",
+        headers: {
+          "Content-Type":    "application/json",
+          "Origin":          "https://web.mig66.com",
+          "Referer":         "https://web.mig66.com/",
+          "User-Agent":      "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+          "Accept":          "application/json, text/plain, */*",
+          "Accept-Language": "en-US,en;q=0.9",
+          "sec-fetch-dest":  "empty",
+          "sec-fetch-mode":  "cors",
+          "sec-fetch-site":  "same-site",
+        },
+        body: JSON.stringify({
+          username:     this.username,
+          password:     this.password,
+          remember_me:  true,
+          login_offline:false,
+          device_info:  "Flutter Web",
+        }),
+      });
 
-    // Retry up to 3 times on network-level failures (ECONNRESET, timeout, etc.)
-    const MAX_ATTEMPTS = 3;
-    for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
-      try {
-        const resp = await fetch(`${API_BASE}/api/auth/login`, {
-          method: "POST",
-          headers: {
-            "Content-Type":    "application/json",
-            "Origin":          "https://web.mig66.com",
-            "Referer":         "https://web.mig66.com/",
-            "User-Agent":      "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
-            "Accept":          "application/json, text/plain, */*",
-            "Accept-Language": "en-US,en;q=0.9",
-            "sec-fetch-dest":  "empty",
-            "sec-fetch-mode":  "cors",
-            "sec-fetch-site":  "same-site",
-          },
-          body: JSON.stringify({
-            username:     this.username,
-            password:     this.password,
-            remember_me:  true,
-            login_offline:false,
-            device_info:  "Flutter Web",
-          }),
-        });
+      // Read raw text first so we can log it on failure
+      const raw = await resp.text();
+      let data;
+      try { data = JSON.parse(raw); }
+      catch { data = {}; }
 
-        // Read raw text first so we can log it on failure
-        const raw = await resp.text();
-        let data;
-        try { data = JSON.parse(raw); }
-        catch { data = {}; }
+      // Token can live at multiple paths depending on API version
+      const tok = data?.token
+               || data?.data?.token
+               || data?.access_token
+               || data?.data?.access_token
+               || null;
 
-        // Token can live at multiple paths depending on API version
-        const tok = data?.token
-                 || data?.data?.token
-                 || data?.access_token
-                 || data?.data?.access_token
-                 || null;
-
-        if (!tok) {
-          this.log(`❌ Login failed (HTTP ${resp.status}) — ${raw.slice(0,200)}`);
-          return false; // credentials wrong / server rejected — retrying won't help
-        }
-
-        this.token = tok;
-        const p = JSON.parse(Buffer.from(tok.split(".")[1], "base64").toString());
-        this.userId = String(p.id || "");
-        this.log(`✓ Logged in — id:${this.userId}`);
-
-        if (this.isMain) { saveTokenToEnv(tok); TOKEN = tok; }
-
-        // Always persist to the per-account store too (mother, parent, sub-account — all of them)
-        saveAccountToken(this.username, tok, this.password || null);
-
-        return true;
-
-      } catch(e) {
-        const isNetworkError = /ECONNRESET|ETIMEDOUT|ENOTFOUND|EAI_AGAIN|socket hang up/i.test(e.message);
-        if (isNetworkError && attempt < MAX_ATTEMPTS) {
-          const backoff = attempt * 2000; // 2s, 4s, 6s
-          this.log(`⚠️ Network error (${e.message}) — retry ${attempt}/${MAX_ATTEMPTS-1} in ${backoff/1000}s...`);
-          await new Promise(r => setTimeout(r, backoff));
-          continue;
-        }
-        this.log(`❌ Login error: ${e.message}`);
+      if (!tok) {
+        this.log(`❌ Login failed (HTTP ${resp.status}) — ${raw.slice(0,200)}`);
         return false;
       }
+
+      this.token = tok;
+      const p = JSON.parse(Buffer.from(tok.split(".")[1], "base64").toString());
+      this.userId = String(p.id || "");
+      this.log(`✓ Logged in — id:${this.userId}`);
+
+      if (this.isMain) { saveTokenToEnv(tok); TOKEN = tok; }
+      return true;
+
+    } catch(e) {
+      this.log(`❌ Login error: ${e.message}`);
+      return false;
     }
-    return false;
   }
 
   isTokenExpired() {
@@ -441,20 +332,6 @@ class BotAccount {
   // Check if PIN is set on this account
   async getPinStatus() { return this.api("GET","/api/account/pin/status"); }
 
-  // Get list of available security questions for PIN setup
-  async getPinQuestions() { return this.api("GET","/api/account/pin/questions"); }
-
-  // Set a new PIN with security question/answer (first-time setup)
-  async setPin(pin, securityQuestion, securityAnswer) {
-    if (!pin || !/^\d{4,8}$/.test(pin)) return { status:400, data:"PIN must be 4-8 digits" };
-    if (!securityQuestion || !securityAnswer) return { status:400, data:"Security question and answer required" };
-    return this.api("POST","/api/account/pin/set", {
-      pin: String(pin),
-      security_question: securityQuestion,
-      security_answer: securityAnswer,
-    });
-  }
-
   // Get full account info including balance
   async getAccount()   { return this.api("GET","/api/account"); }
 
@@ -524,6 +401,82 @@ class BotAccount {
     }, 300);
 
     return true;
+  }
+  // ── Vote ──────────────────────────────────────────────────
+  async voteUser(username) {
+    const r = await this.api("POST", `/api/profile/${encodeURIComponent(username)}/vote`, {});
+    this.log(`🗳️ Vote → @${username}: ${r.status}`);
+    return r;
+  }
+
+  // ── Email ─────────────────────────────────────────────────
+  async sendEmail(toUsername, subject, body) {
+    const r = await this.api("POST", "/api/emails/send", {
+      to_username: toUsername,
+      subject,
+      body,
+    });
+    this.log(`📧 Email → @${toUsername} [${subject}]: ${r.status}`);
+    return r;
+  }
+
+  async getInbox(filter = "all", page = 1) {
+    return await this.api("GET", `/api/emails/inbox?filter=${filter}&page=${page}`);
+  }
+
+  // ── Daily XP login bonus ──────────────────────────────────
+  async claimDailyLogin() {
+    const r = await this.api("POST", "/api/xp/daily-login", {});
+    this.log(`🎯 Daily login XP claim: ${r.status}`);
+    return r;
+  }
+
+  // ── Register new account (no auth needed) ────────────────
+  async registerAccount(username, email, password, gender = "male", country = "Bangladesh") {
+    try {
+      const resp = await fetch(`${API_BASE}/api/auth/register`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Origin: "https://web.mig66.com",
+          Referer: "https://web.mig66.com/",
+          "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+          Accept: "application/json, text/plain, */*",
+          "Accept-Language": "en-US,en;q=0.9",
+          "sec-fetch-dest": "empty",
+          "sec-fetch-mode": "cors",
+          "sec-fetch-site": "same-site",
+        },
+        body: JSON.stringify({ username, email, password, confirm_password: password, gender, country }),
+      });
+      const text = await resp.text();
+      try { return { status: resp.status, data: JSON.parse(text) }; }
+      catch { return { status: resp.status, data: text }; }
+    } catch (e) { return { status: 500, data: e.message }; }
+  }
+
+  // ── Activate account (no auth needed) ────────────────────
+  async activateAccount(activationToken) {
+    try {
+      const resp = await fetch(`${API_BASE}/api/auth/activate`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Origin: "https://web.mig66.com",
+          Referer: "https://web.mig66.com/",
+          "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+          Accept: "application/json, text/plain, */*",
+          "Accept-Language": "en-US,en;q=0.9",
+          "sec-fetch-dest": "empty",
+          "sec-fetch-mode": "cors",
+          "sec-fetch-site": "same-site",
+        },
+        body: JSON.stringify({ token: String(activationToken) }),
+      });
+      const text = await resp.text();
+      try { return { status: resp.status, data: JSON.parse(text) }; }
+      catch { return { status: resp.status, data: text }; }
+    } catch (e) { return { status: 500, data: e.message }; }
   }
 
   // ── Auto-welcome ──────────────────────────────────────────
@@ -1354,6 +1307,204 @@ async function handleCommand(content, senderName, callerAccount, source, sourceR
     }
     return;
   }
+  // ══════════════════════════════════════════════════════════
+  //  VOTE
+  //  |vote <username> [$acc]       → vote for a user
+  //  |vote <username> $aa          → all sub-accounts vote
+  // ══════════════════════════════════════════════════════════
+
+  const voteMatch = cmd.match(/^\|vote\s+(\w+)/i);
+  if (voteMatch) {
+    const voteTarget = voteMatch[1];
+
+    const voters = isAllAccounts
+      ? getAllSubAccounts()
+      : targetAccounts.length > 0 ? targetAccounts : [target];
+
+    if (voters.length === 0) { reply(`❌ No accounts available`); return; }
+
+    if (voters.length === 1) {
+      const r = await voters[0].voteUser(voteTarget);
+      const ok = r.status < 400;
+      const msg = r.data?.message || r.data?.data?.message || JSON.stringify(r.data).slice(0, 80);
+      reply(`${ok ? "✅" : "❌"} @${voters[0].username} voted for @${voteTarget}: ${msg}`);
+    } else {
+      reply(`⏳ Voting for @${voteTarget} from ${voters.length} accounts...`);
+      let ok = 0, fail = 0;
+      for (const acc of voters) {
+        const r = await acc.voteUser(voteTarget);
+        if (r.status < 400) {
+          ok++;
+          const msg = r.data?.message || r.data?.data?.message || "OK";
+          reply(`  ✅ @${acc.username}: ${msg}`);
+        } else {
+          fail++;
+          const msg = r.data?.message || r.data?.data?.message || r.data?.error || JSON.stringify(r.data).slice(0, 60);
+          reply(`  ❌ @${acc.username}: ${msg}`);
+        }
+        await new Promise((res) => setTimeout(res, 300));
+      }
+      reply(`📊 Vote done: ${ok} success, ${fail} failed`);
+    }
+    return;
+  }
+
+  // ══════════════════════════════════════════════════════════
+  //  EMAIL
+  //  |email @<to> #<subject> *<body> [$acc]
+  //  Example: |email @faysal #Hello *How are you? $firefox
+  //
+  //  |inbox [$acc]         → show inbox (page 1)
+  //  |inbox 2 [$acc]       → show inbox page 2
+  // ══════════════════════════════════════════════════════════
+
+  // Send email: |email @username #subject *body
+  const emailMatch = cmd.match(/^\|email\s+@(\w+)\s+#([^*]+)\s*\*(.+)/i);
+  if (emailMatch) {
+    const [, toUser, subject, body] = emailMatch;
+    const emailBody = body.trim();
+    const emailSubject = subject.trim();
+
+    const senders = isAllAccounts
+      ? getAllSubAccounts()
+      : targetAccounts.length > 0 ? targetAccounts : [target];
+
+    if (senders.length === 1) {
+      const r = await senders[0].sendEmail(toUser, emailSubject, emailBody);
+      const ok = r.status < 400;
+      const msg = r.data?.message || r.data?.data?.message || JSON.stringify(r.data).slice(0, 80);
+      reply(`${ok ? "✅" : "❌"} Email from @${senders[0].username} → @${toUser}: ${msg}`);
+    } else {
+      reply(`⏳ Sending email to @${toUser} from ${senders.length} accounts...`);
+      let ok = 0, fail = 0;
+      for (const acc of senders) {
+        const r = await acc.sendEmail(toUser, emailSubject, emailBody);
+        if (r.status < 400) { ok++; reply(`  ✅ @${acc.username}: sent`); }
+        else {
+          fail++;
+          const msg = r.data?.message || r.data?.data?.message || JSON.stringify(r.data).slice(0, 60);
+          reply(`  ❌ @${acc.username}: ${msg}`);
+        }
+        await new Promise((res) => setTimeout(res, 300));
+      }
+      reply(`📊 Email sent: ${ok} success, ${fail} failed`);
+    }
+    return;
+  }
+
+  // Read inbox: |inbox [page] [$acc]
+  const inboxMatch = cmd.match(/^\|inbox(?:\s+(\d+))?/i);
+  if (inboxMatch) {
+    const page = Number(inboxMatch[1] || 1);
+    const r = await target.getInbox("all", page);
+    const emails = r.data?.emails || r.data?.data?.emails || r.data?.data || r.data || [];
+    const list = Array.isArray(emails) ? emails : [];
+    if (!list.length) { reply(`📭 Inbox empty (page ${page}) for @${target.username}`); return; }
+    const lines = list.slice(0, 10).map((e, i) => {
+      const from = e.from_username || e.sender?.username || e.from || "?";
+      const subj = e.subject || "(no subject)";
+      const date = e.created_at ? new Date(e.created_at).toLocaleDateString() : "";
+      return `  ${i + 1}. From:@${from} | ${subj} ${date ? `| ${date}` : ""}`;
+    }).join("\n");
+    reply(`📬 Inbox @${target.username} (page ${page}):\n${lines}`);
+    return;
+  }
+
+  // ══════════════════════════════════════════════════════════
+  //  REGISTRATION & ACTIVATION
+  //  Register:  |reg <username> <email> <password> [gender] [country]
+  //  Syntax:    |reg myuser myuser@email.com mypass123
+  //             |reg myuser myuser@email.com mypass123 female Bangladesh
+  //
+  //  Activate:  |act <activation_code>
+  //  Syntax:    |act 0ADF82
+  //
+  //  After activation, use |lnu username:password to login the new account
+  //
+  //  Daily XP:  |daily [$acc]     → claim daily login XP bonus
+  //             |daily $aa        → all sub-accounts claim
+  // ══════════════════════════════════════════════════════════
+
+  // Register: |reg <username> <email> <password> [gender] [country]
+  const regMatch = cmd.match(/^\|reg\s+(\S+)\s+(\S+)\s+(\S+)(?:\s+(male|female))?(?:\s+(.+))?/i);
+  if (regMatch) {
+    if (!isFullParent) { reply(`❌ Only full parents can register accounts`); return; }
+    const [, regUser, regEmail, regPass, regGender = "male", regCountry = "Bangladesh"] = regMatch;
+
+    reply(`⏳ Registering @${regUser} (${regEmail})...`);
+    const r = await callerAccount.registerAccount(
+      regUser, regEmail, regPass,
+      regGender.toLowerCase(),
+      regCountry.trim()
+    );
+
+    const ok = r.status < 400;
+    const msg = r.data?.message || r.data?.data?.message || r.data?.error || JSON.stringify(r.data).slice(0, 120);
+
+    if (ok) {
+      reply(
+        `✅ Registered @${regUser}!\n` +
+        `  Email: ${regEmail}\n` +
+        `  Password: ${regPass}\n` +
+        `  ${msg}\n\n` +
+        `📧 Check email for activation code, then use:\n` +
+        `  |act <code>\n` +
+        `Then login with:\n` +
+        `  |lnu ${regUser}:${regPass}`
+      );
+    } else {
+      reply(`❌ Registration failed for @${regUser}: ${msg}`);
+    }
+    return;
+  }
+
+  // Activate account: |act <code>
+  const actMatch = cmd.match(/^\|act\s+(\S+)/i);
+  if (actMatch) {
+    if (!isFullParent) { reply(`❌ Only full parents can activate accounts`); return; }
+    const activationCode = actMatch[1].trim();
+
+    reply(`⏳ Activating with code: ${activationCode}...`);
+    const r = await callerAccount.activateAccount(activationCode);
+
+    const ok = r.status < 400;
+    const msg = r.data?.message || r.data?.data?.message || r.data?.error || JSON.stringify(r.data).slice(0, 120);
+    reply(`${ok ? "✅" : "❌"} Activation [${activationCode}]: ${msg}`);
+    return;
+  }
+
+  // Daily XP claim: |daily [$acc or $aa]
+  if (/^\|daily/i.test(cmd)) {
+    const dailyTargets = isAllAccounts
+      ? getAllSubAccounts()
+      : targetAccounts.length > 0 ? targetAccounts : [target];
+
+    if (dailyTargets.length === 1) {
+      const r = await dailyTargets[0].claimDailyLogin();
+      const ok = r.status < 400;
+      const msg = r.data?.message || r.data?.data?.message || r.data?.xp || JSON.stringify(r.data).slice(0, 80);
+      reply(`${ok ? "✅" : "❌"} Daily XP @${dailyTargets[0].username}: ${msg}`);
+    } else {
+      reply(`⏳ Claiming daily XP for ${dailyTargets.length} accounts...`);
+      let ok = 0, fail = 0;
+      for (const acc of dailyTargets) {
+        const r = await acc.claimDailyLogin();
+        if (r.status < 400) {
+          ok++;
+          const msg = r.data?.message || r.data?.data?.message || "OK";
+          reply(`  ✅ @${acc.username}: ${msg}`);
+        } else {
+          fail++;
+          const msg = r.data?.message || r.data?.data?.message || JSON.stringify(r.data).slice(0, 60);
+          reply(`  ❌ @${acc.username}: ${msg}`);
+        }
+        await new Promise((res) => setTimeout(res, 300));
+      }
+      reply(`📊 Daily XP: ${ok} claimed, ${fail} failed`);
+    }
+    return;
+  }
+
 
   // ══════════════════════════════════════════════════════════
   //  FEATURE TOGGLES
@@ -1501,86 +1652,6 @@ async function handleCommand(content, senderName, callerAccount, source, sourceR
   }
 
   // ══════════════════════════════════════════════════════════
-  //  PIN MANAGEMENT
-  //  |pin $acc                       → check if PIN is set
-  //  |pinquestions $acc              → list available security questions
-  //  |setpin <pin> "<question>" <answer> $acc  → set PIN (first time only)
-  // ══════════════════════════════════════════════════════════
-
-  if (/^\|pinquestions/i.test(cmd)) {
-    const r = await target.getPinQuestions();
-    const qs = Array.isArray(r.data) ? r.data : (r.data?.questions || r.data?.data || []);
-    if (!qs.length) { reply(`❌ Could not fetch questions (status ${r.status})`); return; }
-    const list = qs.map((q,i) => `  ${i+1}. ${typeof q === "string" ? q : (q.question || q.text || JSON.stringify(q))}`).join("\n");
-    reply(`❓ Security Questions for @${target.username}:\n${list}`);
-    return;
-  }
-
-  // |setpin 123456 "What city were you born in?" dhaka $acc
-  // Quotes around the question are required since it contains spaces
-  const setPinMatch = cmd.match(/^\|setpin\s+(\d{4,8})\s+"([^"]+)"\s+(.+)/i);
-  if (setPinMatch) {
-    const [, pin, question, answer] = setPinMatch;
-    const accs = targetAccounts.length ? targetAccounts : [target];
-    for (const acc of accs) {
-      const r = await acc.setPin(pin, question, answer.trim());
-      if (r.status < 400) {
-        reply(`✅ @${acc.username} → PIN set successfully 🔐`);
-      } else {
-        reply(`❌ @${acc.username} → PIN setup failed (${r.status}): ${JSON.stringify(r.data).slice(0,150)}`);
-      }
-    }
-    return;
-  }
-
-  // Catch malformed |setpin attempts and show correct usage
-  if (/^\|setpin\b/i.test(cmd)) {
-    reply(`❌ Usage: |setpin <4-8 digit pin> "<security question>" <answer> $acc\n`+
-          `Example: |setpin 123456 "What city were you born in?" dhaka $acc\n`+
-          `Tip: use |pinquestions $acc to see valid questions first.`);
-    return;
-  }
-
-  // ══════════════════════════════════════════════════════════
-  //  TOKEN REFRESH
-  //  |refresh $acc      → re-login one or more specific accounts
-  //  |refresh $aa       → refresh all sub-accounts (skips mother/parent/sub-parent)
-  //  |refresh all       → parent only — refresh EVERY account including mother
-  // ══════════════════════════════════════════════════════════
-
-  if (/^\|refresh\s+all\b/i.test(cmd)) {
-    if (!isFullParent) { reply("❌ Only full parents can refresh ALL accounts."); return; }
-    const all = [...accounts.values()];
-    reply(`⏳ Refreshing ${all.length} account(s) (including mother)...`);
-    let ok=0, fail=0;
-    for (const acc of all) {
-      acc.token = null; // force a fresh login, ignoring any cached/expired token
-      const success = await acc.login();
-      if (success) { ok++; if (!acc.isConnected) acc.connect(ROOM_ID); }
-      else fail++;
-      reply(`${success?"✅":"❌"} @${acc.username}${isMother(acc.username)?" 👑":""} refresh ${success?"OK":"FAILED"}`);
-    }
-    reply(`📊 Refresh complete: ${ok} success, ${fail} failed`);
-    return;
-  }
-
-  if (/^\|refresh\b/i.test(cmd)) {
-    const accs = isAllAccounts ? getAllSubAccounts() : (targetAccounts.length ? targetAccounts : [target]);
-    if (!accs.length) { reply("❌ No matching accounts to refresh."); return; }
-    reply(`⏳ Refreshing ${accs.length} account(s)...`);
-    let ok=0, fail=0;
-    for (const acc of accs) {
-      acc.token = null;
-      const success = await acc.login();
-      if (success) { ok++; if (!acc.isConnected) acc.connect(ROOM_ID); }
-      else fail++;
-      reply(`${success?"✅":"❌"} @${acc.username} refresh ${success?"OK":"FAILED"}`);
-    }
-    if (accs.length > 1) reply(`📊 Refresh done: ${ok} success, ${fail} failed`);
-    return;
-  }
-
-  // ══════════════════════════════════════════════════════════
   //  STATUS & HELP
   // ══════════════════════════════════════════════════════════
   if (/^\|status/i.test(cmd)) {
@@ -1618,6 +1689,23 @@ async function handleCommand(content, senderName, callerAccount, source, sourceR
     h += `  |pin $acc             → check if PIN is set\n`
     h += `  |send <to> <amt> <pin> $acc  → transfer coins\n`
     h += `  |send <to> <amt> <pin> tag $acc  → transfer + announce\n\n`;
+    h += `🗳️ Vote:\n`;
+    h += `  |vote <username> [$acc]          → vote for a user\n`;
+    h += `  |vote <username> $aa             → all sub-accs vote\n\n`;
+    h += `📧 Email:\n`;
+    h += `  |email @<to> #<subject> *<body> [$acc]\n`;
+    h += `  Example: |email @faysal #Hi *Hello there $firefox\n`;
+    h += `  |inbox [page] [$acc]             → read inbox\n\n`;
+    h += `📝 Registration (parent only):\n`;
+    h += `  |reg <user> <email> <pass> [gender] [country]\n`;
+    h += `  Example: |reg myuser me@email.com pass123\n`;
+    h += `  Example: |reg myuser me@email.com pass123 female India\n`;
+    h += `  |act <code>                    → activate with email code\n\n`;
+    h += `⚙️ Parent Only:\n`;
+    h += `  |ap <user>  |rp <user>\n`;
+    h += `  |asp <user>  |rsp <user>\n\n`;
+    h += `🎯 Daily XP:\n`;
+    h += `  |daily [$acc or $aa]             → claim daily login bonus\n\n`;    
     h += `🃏 LowCard Bot Auto-Play:\n`
     h += `  |lcb on <room_id> $acc    → start auto-play in room\n`
     h += `  |lcb off <room_id> $acc   → stop for that room\n`
@@ -1657,30 +1745,6 @@ async function main() {
 
   accounts.set(USERNAME.toLowerCase(), main);
   main.connect(ROOM_ID);
-
-  // ── Auto-restore every other saved account from tokens.json ──
-  // Lets sub-accounts, parents, and any |lnu logins survive a bot restart.
-  const store = loadTokenStore();
-  const savedUsernames = Object.keys(store).filter(u => u !== USERNAME.toLowerCase());
-  if (savedUsernames.length > 0) {
-    console.log(`[startup] Restoring ${savedUsernames.length} saved account(s) from tokens.json...`);
-    for (const uname of savedUsernames) {
-      const entry = store[uname];
-      const acc = new BotAccount({
-        username: entry.username,
-        password: entry.password || null,
-        token: entry.token || null,
-      });
-      const restored = await acc.login();
-      if (restored) {
-        accounts.set(uname, acc);
-        acc.connect(ROOM_ID);
-        console.log(`[startup] ✅ Restored @${entry.username}`);
-      } else {
-        console.log(`[startup] ❌ Could not restore @${entry.username} — token expired and no valid password`);
-      }
-    }
-  }
 
   process.on("SIGINT", () => {
     console.log("\n[*] Shutting down...");
