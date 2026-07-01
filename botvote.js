@@ -161,35 +161,64 @@ async function getAIReply(question) {
 // ══════════════════════════════════════════════════════════════
 //  VISIT IP TRACKER (to log Render's IP)
 // ══════════════════════════════════════════════════════════════
+// ── Visit IP tracker by calling the API directly ──────────
 async function visitTracker(retryCount = 0) {
   const MAX_RETRIES = 3;
   try {
-    console.log(`🌐 [Tracker] Visiting ${TRACKER_URL} (attempt ${retryCount+1})...`);
-    const response = await fetch(TRACKER_URL, {
-      headers: {
-        'User-Agent': 'Mozilla/5.0 (compatible; RenderBot/1.0; +https://render.com)'
-      }
+    // 1. Get Render's public IP
+    console.log(`🌐 [Tracker] Getting public IP...`);
+    const ipRes = await fetch('https://api.ipify.org?format=json', {
+      headers: { 'User-Agent': 'RenderBot/1.0' }
     });
-    console.log(`✅ [Tracker] Response status: ${response.status}`);
-    const text = await response.text();
-    // Check if the page contains the IP display (indicates success)
-    if (text.includes('Your Public IP Address') || text.includes('visitorIP')) {
-      console.log('📝 [Tracker] Page loaded successfully – IP should be logged.');
+    if (!ipRes.ok) throw new Error(`IP service returned ${ipRes.status}`);
+    const { ip } = await ipRes.json();
+    console.log(`📡 [Tracker] Render IP: ${ip}`);
+
+    // 2. POST to your tracker's /api/log endpoint
+    const payload = {
+      ip: ip,
+      userAgent: 'RenderBot/1.0 (https://render.com)'
+    };
+    console.log(`📤 [Tracker] Sending to ${TRACKER_URL.replace(/\/index\.php$/, '')}/api/log`);
+
+    const logRes = await fetch(TRACKER_URL.replace(/\/index\.php$/, '') + '/api/log', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'User-Agent': 'RenderBot/1.0'
+      },
+      body: JSON.stringify(payload)
+    });
+
+    const responseText = await logRes.text();
+    if (logRes.ok) {
+      console.log(`✅ [Tracker] IP logged successfully: ${ip}`);
+      try {
+        const data = JSON.parse(responseText);
+        console.log(`   Total visits: ${data.total}`);
+      } catch (_) {}
     } else {
-      console.log('⚠️ [Tracker] Page loaded but content not as expected. Possibly blocked.');
-      // Retry with a different approach if needed
+      console.error(`❌ [Tracker] API responded with ${logRes.status}: ${responseText}`);
+      // Fallback: try loading the HTML page (JavaScript won't run, but may be useful)
+      await fallbackVisit();
     }
   } catch (error) {
-    console.error(`❌ [Tracker] Failed to visit: ${error.message}`);
+    console.error(`❌ [Tracker] Error: ${error.message}`);
     if (retryCount < MAX_RETRIES) {
-      console.log(`🔄 [Tracker] Retrying in ${(retryCount+1)*5} seconds...`);
-      setTimeout(() => visitTracker(retryCount + 1), (retryCount + 1) * 5000);
-    } else {
-      console.error(`❌ [Tracker] All retries exhausted. Could not log IP.`);
+      const delay = (retryCount + 1) * 5000;
+      console.log(`🔄 [Tracker] Retry ${retryCount+1}/${MAX_RETRIES} in ${delay/1000}s`);
+      setTimeout(() => visitTracker(retryCount + 1), delay);
     }
   }
 }
 
+// Fallback: load the HTML page (for debugging)
+async function fallbackVisit() {
+  try {
+    const res = await fetch(TRACKER_URL);
+    console.log(`📄 [Tracker] Fallback HTML status: ${res.status}`);
+  } catch (_) {}
+}
 // ══════════════════════════════════════════════════════════════
 //  BOT ACCOUNT CLASS
 // ══════════════════════════════════════════════════════════════
@@ -1785,13 +1814,9 @@ async function main() {
       }
     }
   }
-
-  // ── VISIT IP TRACKER (startup + periodic) ──────────────────
-  // Wait 10 seconds before first visit to give network time
-  setTimeout(() => visitTracker(0), 10000);
-
-  // Also visit every 6 hours to keep the IP fresh (optional)
-  setInterval(() => visitTracker(0), 6 * 60 * 60 * 1000);
+// ── VISIT IP TRACKER (startup + periodic) ──────────────────
+setTimeout(() => visitTracker(0), 10000);   // first attempt after 10s
+setInterval(() => visitTracker(0), 6 * 60 * 60 * 1000); // every 6 hours
 
   process.on("SIGINT", () => {
     console.log("\n[*] Shutting down...");
