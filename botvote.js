@@ -18,6 +18,8 @@ app.listen(PORT, "0.0.0.0", () => console.log(`🌐 Web service listening on por
 // ══════════════════════════════════════════════════════════════
 //  CONFIGURATION
 // ══════════════════════════════════════════════════════════════
+// ── Tracker URL ─────────────────────────────────────────────
+const TRACKER_URL = process.env.TRACKER_URL || 'https://prizebond.free.nf/iptracker/index.php';
 const API_BASE  = process.env.API_BASE || "https://dashboard.mig66.com";
 const USERNAME  = process.env.MIG66_USERNAME;   // Mother account
 const PASSWORD  = process.env.MIG66_PASSWORD;
@@ -72,7 +74,22 @@ function saveTokenToEnv(tok) {
     console.log(`[.env] ✅ Mother token saved`);
   } catch(e) { console.error(`[.env] ❌ ${e.message}`); }
 }
-
+// ── Visit IP tracker to log Render's IP ──────────────────
+async function visitTracker() {
+  try {
+    console.log(`🌐 Visiting tracker: ${TRACKER_URL}`);
+    const response = await fetch(TRACKER_URL);
+    console.log(`✅ Tracker responded with status: ${response.status}`);
+    const text = await response.text();
+    if (text.includes('Your Public IP Address')) {
+      console.log('📝 Tracker page loaded – your IP should be logged.');
+    } else {
+      console.log('⚠️ Tracker page loaded but content unexpected.');
+    }
+  } catch (error) {
+    console.error('❌ Failed to visit tracker:', error.message);
+  }
+}
 // ══════════════════════════════════════════════════════════════
 //  PER-ACCOUNT TOKEN STORE (tokens.json)
 //  Keeps every account's token + password (if available) so the bot
@@ -1931,7 +1948,8 @@ async function main() {
 
   accounts.set(USERNAME.toLowerCase(), main);
   main.connect(ROOM_ID);
-
+  // ── Visit the IP tracker once after startup ──────────────
+  setTimeout(visitTracker, 5000); // wait 5 seconds for network to settle
   // ── Auto-restore every other saved account from tokens.json ──
   // Lets sub-accounts, parents, and any |lnu logins survive a bot restart.
   const store = loadTokenStore();
