@@ -69,8 +69,62 @@ function saveTokenToEnv(tok) {
       ? c.replace(/MIG66_TOKEN=.*/g, `MIG66_TOKEN=${tok}`)
       : c + `\nMIG66_TOKEN=${tok}`;
     fs.writeFileSync(p, c, "utf8");
-    console.log(`[.env] ✅ Token saved`);
+    console.log(`[.env] ✅ Mother token saved`);
   } catch(e) { console.error(`[.env] ❌ ${e.message}`); }
+}
+
+// ══════════════════════════════════════════════════════════════
+//  PER-ACCOUNT TOKEN STORE (tokens.json)
+//  Keeps every account's token + password (if available) so the bot
+//  can auto-restore all sub-accounts on restart, and so |refresh
+//  can re-login any account on demand.
+// ══════════════════════════════════════════════════════════════
+const TOKENS_FILE = path.join(__dirname, "tokens.json");
+
+function loadTokenStore() {
+  try {
+    if (!fs.existsSync(TOKENS_FILE)) return {};
+    const raw = fs.readFileSync(TOKENS_FILE, "utf8").trim();
+    if (!raw) return {}; // empty file — treat as no accounts saved yet
+    return JSON.parse(raw);
+  } catch(e) {
+    console.error(`[tokens.json] load error: ${e.message} — resetting to empty store`);
+    return {};
+  }
+}
+
+function saveTokenStore(store) {
+  try {
+    fs.writeFileSync(TOKENS_FILE, JSON.stringify(store, null, 2), "utf8");
+  } catch(e) {
+    console.error(`[tokens.json] save error: ${e.message}`);
+  }
+}
+
+// Save/update one account's entry. Password is stored ONLY if explicitly
+// provided (so |lnu logins can be auto-restored). Token is always updated.
+function saveAccountToken(username, token, password=null) {
+  const store = loadTokenStore();
+  const key = username.toLowerCase();
+  store[key] = {
+    username,
+    token,
+    password: password !== null ? password : (store[key]?.password || null),
+    savedAt: Date.now(),
+  };
+  saveTokenStore(store);
+  console.log(`[tokens.json] ✅ Token saved for @${username}`);
+}
+
+function getStoredAccount(username) {
+  const store = loadTokenStore();
+  return store[username.toLowerCase()] || null;
+}
+
+function removeStoredAccount(username) {
+  const store = loadTokenStore();
+  delete store[username.toLowerCase()];
+  saveTokenStore(store);
 }
 
 function loadLines(file) {
@@ -164,75 +218,130 @@ class BotAccount {
 
   // ── Login ─────────────────────────────────────────────────
   async login() {
-    // Try existing token first
+    // Try existing in-memory token first
     if (this.token && !this.isTokenExpired()) {
       try {
         const p = JSON.parse(Buffer.from(this.token.split(".")[1], "base64").toString());
         this.userId = String(p.id || "");
         this.log(`✓ Token OK — user:${p.username} id:${this.userId} exp:${new Date(p.exp*1000).toLocaleString()}`);
+        // Persist this account into tokens.json even on a token-only login,
+        // so the store always reflects every active account (not just ones
+        // that went through a fresh password login).
+        saveAccountToken(this.username, this.token, this.password || null);
         return true;
       } catch(e) { this.log(`! Token decode: ${e.message}`); }
     }
 
+    // Fall back to the per-account token store (tokens.json)
+    if (!this.token) {
+      const stored = getStoredAccount(this.username);
+      if (stored?.token) {
+        this.token = stored.token;
+        if (!this.isTokenExpired()) {
+          try {
+            const p = JSON.parse(Buffer.from(this.token.split(".")[1], "base64").toString());
+            this.userId = String(p.id || "");
+            this.log(`✓ Restored token from tokens.json — id:${this.userId}`);
+            if (!this.password && stored.password) this.password = stored.password;
+            return true;
+          } catch { this.token = null; }
+        } else {
+          this.token = null; // expired, will fall through to password login
+        }
+      }
+      // Recover password from store if not passed in directly
+      if (!this.password) {
+        const s = getStoredAccount(this.username);
+        if (s?.password) this.password = s.password;
+      }
+    }
+
     if (!this.password) {
-      this.log("❌ No password and no valid token");
+      this.log("❌ No password and no valid token (memory or tokens.json)");
       return false;
     }
+
+    // Throttle: avoid hammering mig66's login endpoint back-to-back.
+    // ECONNRESET often happens when several logins fire within milliseconds
+    // of each other (e.g. |refresh right after |lnu).
+    const now = Date.now();
+    if (BotAccount._lastLoginAttempt && (now - BotAccount._lastLoginAttempt) < 1500) {
+      const wait = 1500 - (now - BotAccount._lastLoginAttempt);
+      await new Promise(r => setTimeout(r, wait));
+    }
+    BotAccount._lastLoginAttempt = Date.now();
 
     this.log(`Logging in as ${this.username}...`);
-    try {
-      const resp = await fetch(`${API_BASE}/api/auth/login`, {
-        method: "POST",
-        headers: {
-          "Content-Type":    "application/json",
-          "Origin":          "https://web.mig66.com",
-          "Referer":         "https://web.mig66.com/",
-          "User-Agent":      "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
-          "Accept":          "application/json, text/plain, */*",
-          "Accept-Language": "en-US,en;q=0.9",
-          "sec-fetch-dest":  "empty",
-          "sec-fetch-mode":  "cors",
-          "sec-fetch-site":  "same-site",
-        },
-        body: JSON.stringify({
-          username:     this.username,
-          password:     this.password,
-          remember_me:  true,
-          login_offline:false,
-          device_info:  "Flutter Web",
-        }),
-      });
 
-      // Read raw text first so we can log it on failure
-      const raw = await resp.text();
-      let data;
-      try { data = JSON.parse(raw); }
-      catch { data = {}; }
+    // Retry up to 3 times on network-level failures (ECONNRESET, timeout, etc.)
+    const MAX_ATTEMPTS = 3;
+    for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
+      try {
+        const resp = await fetch(`${API_BASE}/api/auth/login`, {
+          method: "POST",
+          headers: {
+            "Content-Type":    "application/json",
+            "Origin":          "https://web.mig66.com",
+            "Referer":         "https://web.mig66.com/",
+            "User-Agent":      "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+            "Accept":          "application/json, text/plain, */*",
+            "Accept-Language": "en-US,en;q=0.9",
+            "sec-fetch-dest":  "empty",
+            "sec-fetch-mode":  "cors",
+            "sec-fetch-site":  "same-site",
+          },
+          body: JSON.stringify({
+            username:     this.username,
+            password:     this.password,
+            remember_me:  true,
+            login_offline:false,
+            device_info:  "Flutter Web",
+          }),
+        });
 
-      // Token can live at multiple paths depending on API version
-      const tok = data?.token
-               || data?.data?.token
-               || data?.access_token
-               || data?.data?.access_token
-               || null;
+        // Read raw text first so we can log it on failure
+        const raw = await resp.text();
+        let data;
+        try { data = JSON.parse(raw); }
+        catch { data = {}; }
 
-      if (!tok) {
-        this.log(`❌ Login failed (HTTP ${resp.status}) — ${raw.slice(0,200)}`);
+        // Token can live at multiple paths depending on API version
+        const tok = data?.token
+                 || data?.data?.token
+                 || data?.access_token
+                 || data?.data?.access_token
+                 || null;
+
+        if (!tok) {
+          this.log(`❌ Login failed (HTTP ${resp.status}) — ${raw.slice(0,200)}`);
+          return false; // credentials wrong / server rejected — retrying won't help
+        }
+
+        this.token = tok;
+        const p = JSON.parse(Buffer.from(tok.split(".")[1], "base64").toString());
+        this.userId = String(p.id || "");
+        this.log(`✓ Logged in — id:${this.userId}`);
+
+        if (this.isMain) { saveTokenToEnv(tok); TOKEN = tok; }
+
+        // Always persist to the per-account store too (mother, parent, sub-account — all of them)
+        saveAccountToken(this.username, tok, this.password || null);
+
+        return true;
+
+      } catch(e) {
+        const isNetworkError = /ECONNRESET|ETIMEDOUT|ENOTFOUND|EAI_AGAIN|socket hang up/i.test(e.message);
+        if (isNetworkError && attempt < MAX_ATTEMPTS) {
+          const backoff = attempt * 2000; // 2s, 4s, 6s
+          this.log(`⚠️ Network error (${e.message}) — retry ${attempt}/${MAX_ATTEMPTS-1} in ${backoff/1000}s...`);
+          await new Promise(r => setTimeout(r, backoff));
+          continue;
+        }
+        this.log(`❌ Login error: ${e.message}`);
         return false;
       }
-
-      this.token = tok;
-      const p = JSON.parse(Buffer.from(tok.split(".")[1], "base64").toString());
-      this.userId = String(p.id || "");
-      this.log(`✓ Logged in — id:${this.userId}`);
-
-      if (this.isMain) { saveTokenToEnv(tok); TOKEN = tok; }
-      return true;
-
-    } catch(e) {
-      this.log(`❌ Login error: ${e.message}`);
-      return false;
     }
+    return false;
   }
 
   isTokenExpired() {
@@ -331,6 +440,20 @@ class BotAccount {
 
   // Check if PIN is set on this account
   async getPinStatus() { return this.api("GET","/api/account/pin/status"); }
+
+  // Get list of available security questions for PIN setup
+  async getPinQuestions() { return this.api("GET","/api/account/pin/questions"); }
+
+  // Set a new PIN with security question/answer (first-time setup)
+  async setPin(pin, securityQuestion, securityAnswer) {
+    if (!pin || !/^\d{4,8}$/.test(pin)) return { status:400, data:"PIN must be 4-8 digits" };
+    if (!securityQuestion || !securityAnswer) return { status:400, data:"Security question and answer required" };
+    return this.api("POST","/api/account/pin/set", {
+      pin: String(pin),
+      security_question: securityQuestion,
+      security_answer: securityAnswer,
+    });
+  }
 
   // Get full account info including balance
   async getAccount()   { return this.api("GET","/api/account"); }
@@ -1307,6 +1430,151 @@ async function handleCommand(content, senderName, callerAccount, source, sourceR
     }
     return;
   }
+
+  // ══════════════════════════════════════════════════════════
+  //  FEATURE TOGGLES
+  // ══════════════════════════════════════════════════════════
+  if (/^\|vp\s+on/i.test(cmd))  { target.voucherOn=true;  reply(`✅ Voucher ON @${target.username}`);  return; }
+  if (/^\|vp\s+off/i.test(cmd)) { target.voucherOn=false; reply(`⛔ Voucher OFF @${target.username}`); return; }
+
+  const awOnM = cmd.match(/^\|aw\s+on(?:\s+(\d+))?/i);
+  if (awOnM) {
+    if (awOnM[1]) { target.awRooms.add(Number(awOnM[1])); target.awOn=true; reply(`✅ AW ON room ${awOnM[1]} @${target.username}`); }
+    else { target.awOn=true; target.awRooms.clear(); reply(`✅ AW ON all rooms @${target.username}`); }
+    return;
+  }
+
+  const awOffM = cmd.match(/^\|aw\s+off(?:\s+(\d+))?/i);
+  if (awOffM) {
+    if (awOffM[1]) { target.awRooms.delete(Number(awOffM[1])); if(!target.awRooms.size) target.awOn=false; reply(`⛔ AW OFF room ${awOffM[1]}`); }
+    else { target.awOn=false; target.awRooms.clear(); reply(`⛔ AW OFF @${target.username}`); }
+    return;
+  }
+
+  const awMsgM = cmd.match(/^\|aw_msg\s+(?:#(\d+)\s+)?(.+)/i);
+  if (awMsgM) {
+    if (awMsgM[1]) { target.awMessages.set(Number(awMsgM[1]),awMsgM[2]); reply(`✅ AW msg room ${awMsgM[1]}: "${awMsgM[2]}"`); }
+    else { target.awTemplate=awMsgM[2]; reply(`✅ AW default: "${awMsgM[2]}"`); }
+    return;
+  }
+
+  if (/^\|ar\s+on/i.test(cmd))  { target.autoReplyOn=true;  reply(`✅ Auto-reply ON @${target.username}`);  return; }
+  if (/^\|ar\s+off/i.test(cmd)) { target.autoReplyOn=false; reply(`⛔ Auto-reply OFF @${target.username}`); return; }
+
+  // ══════════════════════════════════════════════════════════
+  //  AUTO-TEXT
+  // ══════════════════════════════════════════════════════════
+  const atOnM = cmd.match(/^\|at\s+on(?:\s+(\d+))?/i);
+  if (atOnM) {
+    if (!atOnM[1]) { reply("❌ Specify room: |at on <room_id>"); return; }
+    if (!target.autoTextMessages.length) target.autoTextMessages = loadLines("at.txt");
+    if (!target.autoTextMessages.length) { reply("❌ at.txt is empty"); return; }
+    target.autoTextRooms.add(Number(atOnM[1])); target.autoTextOn=true;
+    if (target.isConnected) { target.stopAutoText(); target.startAutoText(); }
+    reply(`✅ AT ON room ${atOnM[1]} @${target.username} (${target.autoTextMessages.length} msgs, ${target.autoTextInterval}m)`); return;
+  }
+
+  const atOffM = cmd.match(/^\|at\s+off(?:\s+(\d+))?/i);
+  if (atOffM) {
+    if (atOffM[1]) {
+      target.autoTextRooms.delete(Number(atOffM[1]));
+      if (!target.autoTextRooms.size) { target.autoTextOn=false; target.stopAutoText(); }
+      reply(`⛔ AT OFF room ${atOffM[1]} @${target.username}`);
+    } else {
+      target.autoTextOn=false; target.autoTextRooms.clear(); target.stopAutoText();
+      reply(`⛔ AT OFF @${target.username}`);
+    }
+    return;
+  }
+
+  const atIntM = cmd.match(/^\|at\s+interval\s+(\d+)/i);
+  if (atIntM) {
+    const m=Number(atIntM[1]); if(m<1){reply("❌ Min 1 minute");return;}
+    target.setAutoTextInterval(m); reply(`✅ AT interval ${m}m @${target.username}`); return;
+  }
+
+  if (/^\|at\s+reload/i.test(cmd)) {
+    target.autoTextMessages=loadLines("at.txt"); target.autoTextIndex.clear();
+    if (target.autoTextOn) { target.stopAutoText(); target.startAutoText(); }
+    reply(`✅ Reloaded ${target.autoTextMessages.length} msgs from at.txt`); return;
+  }
+
+  if (/^\|at\s+status/i.test(cmd)) {
+    if (!target.autoTextOn) { reply(`📝 AT OFF @${target.username}`); return; }
+    const lines=[`📝 AT @${target.username}:`,`  Msgs:${target.autoTextMessages.length}`,`  Int:${target.autoTextInterval}m`,`  Rooms:${[...target.autoTextRooms].join(",")}`];
+    for (const r of target.autoTextRooms) lines.push(`  Room ${r}: ${(target.autoTextIndex.get(r)||0)+1}/${target.autoTextMessages.length}`);
+    reply(lines.join("\n")); return;
+  }
+
+  // ══════════════════════════════════════════════════════════
+  //  PARENT MANAGEMENT (full parent only)
+  // ══════════════════════════════════════════════════════════
+  const aspM=cmd.match(/^\|asp\s+(\w+)/i); if(aspM&&isFullParent){SUB_PARENT_USERS.add(aspM[1].toLowerCase());reply(`✅ @${aspM[1]} added as sub-parent`);return;}
+  const rspM=cmd.match(/^\|rsp\s+(\w+)/i); if(rspM&&isFullParent){SUB_PARENT_USERS.delete(rspM[1].toLowerCase());reply(`✅ @${rspM[1]} removed from sub-parents`);return;}
+  const apM =cmd.match(/^\|ap\s+(\w+)/i);  if(apM&&isFullParent){PARENT_USERS.add(apM[1].toLowerCase());reply(`✅ @${apM[1]} added as parent`);return;}
+  const rpM =cmd.match(/^\|rp\s+(\w+)/i);  if(rpM&&isFullParent){PARENT_USERS.delete(rpM[1].toLowerCase());reply(`✅ @${rpM[1]} removed from parents`);return;}
+
+  // ══════════════════════════════════════════════════════════
+  //  LOWCARD BOT AUTO-PLAY COMMANDS
+  // ══════════════════════════════════════════════════════════
+
+  // |lcb on <roomId> $acc   — enable LCB auto-play for account in room
+  // |lcb off <roomId> $acc  — disable
+  // |lcb off $acc           — disable all rooms for account
+  // |lcb status $acc        — show LCB state
+  const lcbOnMatch = cmd.match(/^\|lcb\s+on\s+(\d+)/i);
+  if (lcbOnMatch) {
+    const rid = lcbOnMatch[1];
+    const accs = targetAccounts.length ? targetAccounts : [target];
+    for (const acc of accs) {
+      // Make sure account is in the room first
+      if (!acc.joinedRooms.has(Number(rid))) {
+        acc.joinRoom(rid);
+        // Give a moment to join before enabling LCB
+        setTimeout(() => { acc.lcbStart(Number(rid)); }, 1500);
+        reply(`✅ @${acc.username} → joining room ${rid} + LCB ON 🃏`);
+      } else {
+        acc.lcbStart(Number(rid));
+        reply(`✅ @${acc.username} → LCB AUTO-PLAY ON in room ${rid} 🃏`);
+      }
+    }
+    return;
+  }
+
+  const lcbOffRoomMatch = cmd.match(/^\|lcb\s+off\s+(\d+)/i);
+  if (lcbOffRoomMatch) {
+    const rid = lcbOffRoomMatch[1];
+    const accs = targetAccounts.length ? targetAccounts : [target];
+    for (const acc of accs) {
+      acc.lcbStop(Number(rid));
+      reply(`⛔ @${acc.username} → LCB OFF in room ${rid}`);
+    }
+    return;
+  }
+
+  if (/^\|lcb\s+off/i.test(cmd)) {
+    const accs = targetAccounts.length ? targetAccounts : [target];
+    for (const acc of accs) {
+      const count = acc.lcbRooms.size;
+      acc.lcbStopAll();
+      reply(`⛔ @${acc.username} → LCB OFF (stopped ${count} room(s))`);
+    }
+    return;
+  }
+
+  if (/^\|lcb\s+status/i.test(cmd)) {
+    const accs = targetAccounts.length ? targetAccounts : [target];
+    for (const acc of accs) {
+      if (!acc.lcbRooms.size) { reply(`🃏 @${acc.username}: LCB OFF (no rooms)`); continue; }
+      const lines = [`🃏 @${acc.username} LCB Status:`];
+      for (const rid of acc.lcbRooms) {
+        const s = acc.lcbState.get(rid);
+        lines.push(`  Room ${rid}: phase=${s?.phase||"?"} round=${s?.round||0} joined=${s?.joinedGame||false}`);
+      }
+      reply(lines.join("\n"));
+    }
+    return;
+  }
   // ══════════════════════════════════════════════════════════
   //  VOTE
   //  |vote <username> [$acc]       → vote for a user
@@ -1507,147 +1775,82 @@ async function handleCommand(content, senderName, callerAccount, source, sourceR
 
 
   // ══════════════════════════════════════════════════════════
-  //  FEATURE TOGGLES
+  //  PIN MANAGEMENT
+  //  |pin $acc                       → check if PIN is set
+  //  |pinquestions $acc              → list available security questions
+  //  |setpin <pin> "<question>" <answer> $acc  → set PIN (first time only)
   // ══════════════════════════════════════════════════════════
-  if (/^\|vp\s+on/i.test(cmd))  { target.voucherOn=true;  reply(`✅ Voucher ON @${target.username}`);  return; }
-  if (/^\|vp\s+off/i.test(cmd)) { target.voucherOn=false; reply(`⛔ Voucher OFF @${target.username}`); return; }
 
-  const awOnM = cmd.match(/^\|aw\s+on(?:\s+(\d+))?/i);
-  if (awOnM) {
-    if (awOnM[1]) { target.awRooms.add(Number(awOnM[1])); target.awOn=true; reply(`✅ AW ON room ${awOnM[1]} @${target.username}`); }
-    else { target.awOn=true; target.awRooms.clear(); reply(`✅ AW ON all rooms @${target.username}`); }
+  if (/^\|pinquestions/i.test(cmd)) {
+    const r = await target.getPinQuestions();
+    const qs = Array.isArray(r.data) ? r.data : (r.data?.questions || r.data?.data || []);
+    if (!qs.length) { reply(`❌ Could not fetch questions (status ${r.status})`); return; }
+    const list = qs.map((q,i) => `  ${i+1}. ${typeof q === "string" ? q : (q.question || q.text || JSON.stringify(q))}`).join("\n");
+    reply(`❓ Security Questions for @${target.username}:\n${list}`);
     return;
   }
 
-  const awOffM = cmd.match(/^\|aw\s+off(?:\s+(\d+))?/i);
-  if (awOffM) {
-    if (awOffM[1]) { target.awRooms.delete(Number(awOffM[1])); if(!target.awRooms.size) target.awOn=false; reply(`⛔ AW OFF room ${awOffM[1]}`); }
-    else { target.awOn=false; target.awRooms.clear(); reply(`⛔ AW OFF @${target.username}`); }
-    return;
-  }
-
-  const awMsgM = cmd.match(/^\|aw_msg\s+(?:#(\d+)\s+)?(.+)/i);
-  if (awMsgM) {
-    if (awMsgM[1]) { target.awMessages.set(Number(awMsgM[1]),awMsgM[2]); reply(`✅ AW msg room ${awMsgM[1]}: "${awMsgM[2]}"`); }
-    else { target.awTemplate=awMsgM[2]; reply(`✅ AW default: "${awMsgM[2]}"`); }
-    return;
-  }
-
-  if (/^\|ar\s+on/i.test(cmd))  { target.autoReplyOn=true;  reply(`✅ Auto-reply ON @${target.username}`);  return; }
-  if (/^\|ar\s+off/i.test(cmd)) { target.autoReplyOn=false; reply(`⛔ Auto-reply OFF @${target.username}`); return; }
-
-  // ══════════════════════════════════════════════════════════
-  //  AUTO-TEXT
-  // ══════════════════════════════════════════════════════════
-  const atOnM = cmd.match(/^\|at\s+on(?:\s+(\d+))?/i);
-  if (atOnM) {
-    if (!atOnM[1]) { reply("❌ Specify room: |at on <room_id>"); return; }
-    if (!target.autoTextMessages.length) target.autoTextMessages = loadLines("at.txt");
-    if (!target.autoTextMessages.length) { reply("❌ at.txt is empty"); return; }
-    target.autoTextRooms.add(Number(atOnM[1])); target.autoTextOn=true;
-    if (target.isConnected) { target.stopAutoText(); target.startAutoText(); }
-    reply(`✅ AT ON room ${atOnM[1]} @${target.username} (${target.autoTextMessages.length} msgs, ${target.autoTextInterval}m)`); return;
-  }
-
-  const atOffM = cmd.match(/^\|at\s+off(?:\s+(\d+))?/i);
-  if (atOffM) {
-    if (atOffM[1]) {
-      target.autoTextRooms.delete(Number(atOffM[1]));
-      if (!target.autoTextRooms.size) { target.autoTextOn=false; target.stopAutoText(); }
-      reply(`⛔ AT OFF room ${atOffM[1]} @${target.username}`);
-    } else {
-      target.autoTextOn=false; target.autoTextRooms.clear(); target.stopAutoText();
-      reply(`⛔ AT OFF @${target.username}`);
-    }
-    return;
-  }
-
-  const atIntM = cmd.match(/^\|at\s+interval\s+(\d+)/i);
-  if (atIntM) {
-    const m=Number(atIntM[1]); if(m<1){reply("❌ Min 1 minute");return;}
-    target.setAutoTextInterval(m); reply(`✅ AT interval ${m}m @${target.username}`); return;
-  }
-
-  if (/^\|at\s+reload/i.test(cmd)) {
-    target.autoTextMessages=loadLines("at.txt"); target.autoTextIndex.clear();
-    if (target.autoTextOn) { target.stopAutoText(); target.startAutoText(); }
-    reply(`✅ Reloaded ${target.autoTextMessages.length} msgs from at.txt`); return;
-  }
-
-  if (/^\|at\s+status/i.test(cmd)) {
-    if (!target.autoTextOn) { reply(`📝 AT OFF @${target.username}`); return; }
-    const lines=[`📝 AT @${target.username}:`,`  Msgs:${target.autoTextMessages.length}`,`  Int:${target.autoTextInterval}m`,`  Rooms:${[...target.autoTextRooms].join(",")}`];
-    for (const r of target.autoTextRooms) lines.push(`  Room ${r}: ${(target.autoTextIndex.get(r)||0)+1}/${target.autoTextMessages.length}`);
-    reply(lines.join("\n")); return;
-  }
-
-  // ══════════════════════════════════════════════════════════
-  //  PARENT MANAGEMENT (full parent only)
-  // ══════════════════════════════════════════════════════════
-  const aspM=cmd.match(/^\|asp\s+(\w+)/i); if(aspM&&isFullParent){SUB_PARENT_USERS.add(aspM[1].toLowerCase());reply(`✅ @${aspM[1]} added as sub-parent`);return;}
-  const rspM=cmd.match(/^\|rsp\s+(\w+)/i); if(rspM&&isFullParent){SUB_PARENT_USERS.delete(rspM[1].toLowerCase());reply(`✅ @${rspM[1]} removed from sub-parents`);return;}
-  const apM =cmd.match(/^\|ap\s+(\w+)/i);  if(apM&&isFullParent){PARENT_USERS.add(apM[1].toLowerCase());reply(`✅ @${apM[1]} added as parent`);return;}
-  const rpM =cmd.match(/^\|rp\s+(\w+)/i);  if(rpM&&isFullParent){PARENT_USERS.delete(rpM[1].toLowerCase());reply(`✅ @${rpM[1]} removed from parents`);return;}
-
-  // ══════════════════════════════════════════════════════════
-  //  LOWCARD BOT AUTO-PLAY COMMANDS
-  // ══════════════════════════════════════════════════════════
-
-  // |lcb on <roomId> $acc   — enable LCB auto-play for account in room
-  // |lcb off <roomId> $acc  — disable
-  // |lcb off $acc           — disable all rooms for account
-  // |lcb status $acc        — show LCB state
-  const lcbOnMatch = cmd.match(/^\|lcb\s+on\s+(\d+)/i);
-  if (lcbOnMatch) {
-    const rid = lcbOnMatch[1];
+  // |setpin 123456 "What city were you born in?" dhaka $acc
+  // Quotes around the question are required since it contains spaces
+  const setPinMatch = cmd.match(/^\|setpin\s+(\d{4,8})\s+"([^"]+)"\s+(.+)/i);
+  if (setPinMatch) {
+    const [, pin, question, answer] = setPinMatch;
     const accs = targetAccounts.length ? targetAccounts : [target];
     for (const acc of accs) {
-      // Make sure account is in the room first
-      if (!acc.joinedRooms.has(Number(rid))) {
-        acc.joinRoom(rid);
-        // Give a moment to join before enabling LCB
-        setTimeout(() => { acc.lcbStart(Number(rid)); }, 1500);
-        reply(`✅ @${acc.username} → joining room ${rid} + LCB ON 🃏`);
+      const r = await acc.setPin(pin, question, answer.trim());
+      if (r.status < 400) {
+        reply(`✅ @${acc.username} → PIN set successfully 🔐`);
       } else {
-        acc.lcbStart(Number(rid));
-        reply(`✅ @${acc.username} → LCB AUTO-PLAY ON in room ${rid} 🃏`);
+        reply(`❌ @${acc.username} → PIN setup failed (${r.status}): ${JSON.stringify(r.data).slice(0,150)}`);
       }
     }
     return;
   }
 
-  const lcbOffRoomMatch = cmd.match(/^\|lcb\s+off\s+(\d+)/i);
-  if (lcbOffRoomMatch) {
-    const rid = lcbOffRoomMatch[1];
-    const accs = targetAccounts.length ? targetAccounts : [target];
-    for (const acc of accs) {
-      acc.lcbStop(Number(rid));
-      reply(`⛔ @${acc.username} → LCB OFF in room ${rid}`);
-    }
+  // Catch malformed |setpin attempts and show correct usage
+  if (/^\|setpin\b/i.test(cmd)) {
+    reply(`❌ Usage: |setpin <4-8 digit pin> "<security question>" <answer> $acc\n`+
+          `Example: |setpin 123456 "What city were you born in?" dhaka $acc\n`+
+          `Tip: use |pinquestions $acc to see valid questions first.`);
     return;
   }
 
-  if (/^\|lcb\s+off/i.test(cmd)) {
-    const accs = targetAccounts.length ? targetAccounts : [target];
-    for (const acc of accs) {
-      const count = acc.lcbRooms.size;
-      acc.lcbStopAll();
-      reply(`⛔ @${acc.username} → LCB OFF (stopped ${count} room(s))`);
+  // ══════════════════════════════════════════════════════════
+  //  TOKEN REFRESH
+  //  |refresh $acc      → re-login one or more specific accounts
+  //  |refresh $aa       → refresh all sub-accounts (skips mother/parent/sub-parent)
+  //  |refresh all       → parent only — refresh EVERY account including mother
+  // ══════════════════════════════════════════════════════════
+
+  if (/^\|refresh\s+all\b/i.test(cmd)) {
+    if (!isFullParent) { reply("❌ Only full parents can refresh ALL accounts."); return; }
+    const all = [...accounts.values()];
+    reply(`⏳ Refreshing ${all.length} account(s) (including mother)...`);
+    let ok=0, fail=0;
+    for (const acc of all) {
+      acc.token = null; // force a fresh login, ignoring any cached/expired token
+      const success = await acc.login();
+      if (success) { ok++; if (!acc.isConnected) acc.connect(ROOM_ID); }
+      else fail++;
+      reply(`${success?"✅":"❌"} @${acc.username}${isMother(acc.username)?" 👑":""} refresh ${success?"OK":"FAILED"}`);
     }
+    reply(`📊 Refresh complete: ${ok} success, ${fail} failed`);
     return;
   }
 
-  if (/^\|lcb\s+status/i.test(cmd)) {
-    const accs = targetAccounts.length ? targetAccounts : [target];
+  if (/^\|refresh\b/i.test(cmd)) {
+    const accs = isAllAccounts ? getAllSubAccounts() : (targetAccounts.length ? targetAccounts : [target]);
+    if (!accs.length) { reply("❌ No matching accounts to refresh."); return; }
+    reply(`⏳ Refreshing ${accs.length} account(s)...`);
+    let ok=0, fail=0;
     for (const acc of accs) {
-      if (!acc.lcbRooms.size) { reply(`🃏 @${acc.username}: LCB OFF (no rooms)`); continue; }
-      const lines = [`🃏 @${acc.username} LCB Status:`];
-      for (const rid of acc.lcbRooms) {
-        const s = acc.lcbState.get(rid);
-        lines.push(`  Room ${rid}: phase=${s?.phase||"?"} round=${s?.round||0} joined=${s?.joinedGame||false}`);
-      }
-      reply(lines.join("\n"));
+      acc.token = null;
+      const success = await acc.login();
+      if (success) { ok++; if (!acc.isConnected) acc.connect(ROOM_ID); }
+      else fail++;
+      reply(`${success?"✅":"❌"} @${acc.username} refresh ${success?"OK":"FAILED"}`);
     }
+    if (accs.length > 1) reply(`📊 Refresh done: ${ok} success, ${fail} failed`);
     return;
   }
 
@@ -1689,23 +1892,6 @@ async function handleCommand(content, senderName, callerAccount, source, sourceR
     h += `  |pin $acc             → check if PIN is set\n`
     h += `  |send <to> <amt> <pin> $acc  → transfer coins\n`
     h += `  |send <to> <amt> <pin> tag $acc  → transfer + announce\n\n`;
-    h += `🗳️ Vote:\n`;
-    h += `  |vote <username> [$acc]          → vote for a user\n`;
-    h += `  |vote <username> $aa             → all sub-accs vote\n\n`;
-    h += `📧 Email:\n`;
-    h += `  |email @<to> #<subject> *<body> [$acc]\n`;
-    h += `  Example: |email @faysal #Hi *Hello there $firefox\n`;
-    h += `  |inbox [page] [$acc]             → read inbox\n\n`;
-    h += `📝 Registration (parent only):\n`;
-    h += `  |reg <user> <email> <pass> [gender] [country]\n`;
-    h += `  Example: |reg myuser me@email.com pass123\n`;
-    h += `  Example: |reg myuser me@email.com pass123 female India\n`;
-    h += `  |act <code>                    → activate with email code\n\n`;
-    h += `⚙️ Parent Only:\n`;
-    h += `  |ap <user>  |rp <user>\n`;
-    h += `  |asp <user>  |rsp <user>\n\n`;
-    h += `🎯 Daily XP:\n`;
-    h += `  |daily [$acc or $aa]             → claim daily login bonus\n\n`;    
     h += `🃏 LowCard Bot Auto-Play:\n`
     h += `  |lcb on <room_id> $acc    → start auto-play in room\n`
     h += `  |lcb off <room_id> $acc   → stop for that room\n`
@@ -1745,6 +1931,30 @@ async function main() {
 
   accounts.set(USERNAME.toLowerCase(), main);
   main.connect(ROOM_ID);
+
+  // ── Auto-restore every other saved account from tokens.json ──
+  // Lets sub-accounts, parents, and any |lnu logins survive a bot restart.
+  const store = loadTokenStore();
+  const savedUsernames = Object.keys(store).filter(u => u !== USERNAME.toLowerCase());
+  if (savedUsernames.length > 0) {
+    console.log(`[startup] Restoring ${savedUsernames.length} saved account(s) from tokens.json...`);
+    for (const uname of savedUsernames) {
+      const entry = store[uname];
+      const acc = new BotAccount({
+        username: entry.username,
+        password: entry.password || null,
+        token: entry.token || null,
+      });
+      const restored = await acc.login();
+      if (restored) {
+        accounts.set(uname, acc);
+        acc.connect(ROOM_ID);
+        console.log(`[startup] ✅ Restored @${entry.username}`);
+      } else {
+        console.log(`[startup] ❌ Could not restore @${entry.username} — token expired and no valid password`);
+      }
+    }
+  }
 
   process.on("SIGINT", () => {
     console.log("\n[*] Shutting down...");
